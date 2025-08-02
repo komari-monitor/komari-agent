@@ -180,7 +180,7 @@ uninstall_previous
 install_dependencies() {
     log_step "Checking and installing dependencies..."
 
-    local deps="curl"
+    local deps="curl vnstat"
     local missing_deps=""
     for cmd in $deps; do
         if ! command -v $cmd >/dev/null 2>&1; then
