@@ -625,9 +625,7 @@ EOF
     
     # Add program arguments if provided
     if [ -n "$komari_args" ]; then
-        for arg in $komari_args; do
-            echo "        <string>$arg</string>" >> "$plist_file"
-        done
+        echo "$komari_args" | xargs -n1 printf "        <string>%s</string>\n"  
     fi
     
     cat >> "$plist_file" << EOF
