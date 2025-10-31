@@ -40,7 +40,7 @@ service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
 install_version="" # New parameter for specifying version
-need_vnstat=false # Flag to indicate if vnstat is needed
+ 
 
 # Detect OS
 os_type=$(uname -s)
@@ -90,11 +90,6 @@ while [[ $# -gt 0 ]]; do
             install_version="$2"
             shift 2
             ;;
-        --month-rotate)
-            need_vnstat=true
-            komari_args="$komari_args $1"
-            shift
-            ;;
         --install*)
             log_warning "Unknown install parameter: $1"
             shift
@@ -138,11 +133,6 @@ if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
 else
     log_config "  Agent version: ${GREEN}Latest${NC}"
-fi
-if [ "$need_vnstat" = true ]; then
-    log_config "  vnstat installation: ${GREEN}Required (--month-rotate detected)${NC}"
-else
-    log_config "  vnstat installation: ${GREEN}Not required${NC}"
 fi
 echo ""
 
@@ -239,68 +229,11 @@ install_dependencies() {
     fi
 }
 
-# Function to install vnstat if needed
-install_vnstat() {
-    if [ "$need_vnstat" = true ]; then
-        log_step "Checking and installing vnstat for --month-rotate functionality..."
-        
-        if command -v vnstat >/dev/null 2>&1; then
-            log_success "vnstat is already installed"
-            return
-        fi
-        
-        log_info "vnstat not found, installing..."
-        
-        # Install vnstat based on package manager
-        if command -v apt >/dev/null 2>&1; then
-            log_info "Using apt to install vnstat..."
-            apt update
-            apt install -y vnstat
-        elif command -v yum >/dev/null 2>&1; then
-            log_info "Using yum to install vnstat..."
-            yum install -y vnstat
-        elif command -v dnf >/dev/null 2>&1; then
-            log_info "Using dnf to install vnstat..."
-            dnf install -y vnstat
-        elif command -v apk >/dev/null 2>&1; then
-            log_info "Using apk to install vnstat..."
-            apk add vnstat
-        elif command -v brew >/dev/null 2>&1; then
-            log_info "Using Homebrew to install vnstat..."
-            brew install vnstat
-        elif command -v pacman >/dev/null 2>&1; then
-            log_info "Using pacman to install vnstat..."
-            pacman -S --noconfirm vnstat
-        else
-            log_error "No supported package manager found for vnstat installation"
-            log_error "Please install vnstat manually to use --month-rotate functionality"
-            exit 1
-        fi
-        
-        # Verify installation
-        if command -v vnstat >/dev/null 2>&1; then
-            log_success "vnstat installed successfully"
-            
-            # Start vnstat daemon if systemd is available
-            if command -v systemctl >/dev/null 2>&1; then
-                log_info "Starting vnstat daemon..."
-                systemctl enable vnstat
-                systemctl start vnstat
-            elif [ "$os_name" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
-                log_info "vnstat daemon management varies on macOS, please check vnstat documentation"
-            fi
-        else
-            log_error "Failed to install vnstat"
-            exit 1
-        fi
-    fi
-}
-
+ 
 # Install dependencies
 install_dependencies
 
-# Install vnstat if needed for month-rotate
-install_vnstat
+ 
 
 # Architecture detection with platform-specific support
 arch=$(uname -m)
@@ -625,7 +558,7 @@ EOF
     
     # Add program arguments if provided
     if [ -n "$komari_args" ]; then
-        echo "$komari_args" | xargs -n1 printf "        <string>%s</string>\n"  
+        echo "$komari_args" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
     fi
     
     cat >> "$plist_file" << EOF

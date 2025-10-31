@@ -1,7 +1,6 @@
 package monitoring
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/komari-monitor/komari-agent/cmd/flags"
@@ -229,37 +228,11 @@ func TestNetworkSpeedWithMonthRotate(t *testing.T) {
 
 	// 如果vnstat不可用，可能会回退到原来的方法，这是正常的
 	if err != nil {
-		if strings.Contains(err.Error(), "failed to call vnstat") {
-			t.Logf("vnstat not available, this is expected in test environment: %v", err)
-			return
-		}
 		t.Fatalf("NetworkSpeed failed: %v", err)
-	}
-
-	if totalUp < 0 {
-		t.Errorf("Expected non-negative totalUp, got %d", totalUp)
-	}
-
-	if totalDown < 0 {
-		t.Errorf("Expected non-negative totalDown, got %d", totalDown)
 	}
 
 	t.Logf("With MonthRotate - TotalUp: %d, TotalDown: %d, UpSpeed: %d/s, DownSpeed: %d/s",
 		totalUp, totalDown, upSpeed, downSpeed)
-}
-
-func TestGetVnstatData(t *testing.T) {
-	// 这个测试可能会失败，因为vnstat可能没有安装
-	_, err := getVnstatData()
-	if err != nil {
-		if strings.Contains(err.Error(), "failed to run vnstat") {
-			t.Logf("vnstat not available, this is expected: %v", err)
-			return
-		}
-		t.Fatalf("getVnstatData failed unexpectedly: %v", err)
-	}
-
-	t.Log("vnstat data retrieved successfully")
 }
 
 func TestNetworkSpeedWithNicFilters(t *testing.T) {

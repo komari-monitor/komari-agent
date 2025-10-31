@@ -1,13 +1,12 @@
 package monitoring
 
 import (
-	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
 	"github.com/shirou/gopsutil/v4/net"
 )
 
@@ -126,103 +125,29 @@ type VnstatOutput struct {
 	Interfaces    []VnstatInterface `json:"interfaces"`
 }
 
-func getVnstatData() (map[string]VnstatInterface, error) {
-	cmd := exec.Command("vnstat", "--json")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run vnstat: %w", err)
-	}
-
-	var vnstatOutput VnstatOutput
-	if err := json.Unmarshal(output, &vnstatOutput); err != nil {
-		return nil, fmt.Errorf("failed to parse vnstat output: %w", err)
-	}
-
-	interfaceMap := make(map[string]VnstatInterface)
-	for _, iface := range vnstatOutput.Interfaces {
-		interfaceMap[iface.Name] = iface
-	}
-
-	return interfaceMap, nil
-}
-
-// calculateMonthlyUsage 计算从月重置日到当前日期的流量使用量
-func calculateMonthlyUsage(iface VnstatInterface, monthRotateDay int) (rx, tx uint64) {
-	now := time.Now()
-	currentYear := now.Year()
-	currentMonth := int(now.Month())
-	currentDay := now.Day()
-
-	// 确定统计的起始日期
-	var startYear, startMonth, startDay int
-	if currentDay >= monthRotateDay {
-		// 当前月的重置日已过，从当前月的重置日开始计算
-		startYear = currentYear
-		startMonth = currentMonth
-		startDay = monthRotateDay
-	} else {
-		// 当前月的重置日未到，从上个月的重置日开始计算
-		if currentMonth == 1 {
-			startYear = currentYear - 1
-			startMonth = 12
-		} else {
-			startYear = currentYear
-			startMonth = currentMonth - 1
-		}
-		startDay = monthRotateDay
-	}
-
-	startTime := time.Date(startYear, time.Month(startMonth), startDay, 0, 0, 0, 0, time.Local)
-
-	// 统计从起始时间到现在的流量
-	for _, entry := range iface.Traffic.Day {
-		entryTime := time.Date(entry.Date.Year, time.Month(entry.Date.Month), entry.Date.Day, 0, 0, 0, 0, time.Local)
-		if entryTime.After(startTime) || entryTime.Equal(startTime) {
-			rx += entry.Rx
-			tx += entry.Tx
-		}
-	}
-
-	return rx, tx
-}
-
-// setVnstatMonthRotate 设置vnstat的月重置日期
-func setVnstatMonthRotate(day int) error {
-	if day < 1 || day > 31 {
-		return fmt.Errorf("invalid day: %d, must be between 1 and 31", day)
-	}
-
-	cmd := exec.Command("vnstat", "--config", fmt.Sprintf("MonthRotate %d", day))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to set vnstat month rotate to day %d: %w", day, err)
-	}
-
-	return nil
-}
-
 func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 	includeNics := parseNics(flags.IncludeNics)
 	excludeNics := parseNics(flags.ExcludeNics)
 
-	// 如果设置了月重置（非0），使用vnstat统计totalUp、totalDown
+	// 如果设置了月重置（非0），统计totalUp、totalDown
 	if flags.MonthRotate != 0 {
-
-		vnstatData, err := getVnstatData()
+		netstatic.StartOrContinue() // 确保netstatic在运行
+		now := uint64(time.Now().Unix())
+		aMonthAgo := now - uint64(30*24*3600)
+		nicStatics, err := netstatic.GetTotalTrafficBetween(aMonthAgo, now)
 		if err != nil {
-			// 如果vnstat失败，回退到原来的方法，并返回额外的错误信息
+			// 如果netstatic失败，回退到原来的方法，并返回额外的错误信息
 			fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fallbackErr := getNetworkSpeedFallback(includeNics, excludeNics)
 			if fallbackErr != nil {
-				return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to call vnstat: %v; fallback error: %w", err, fallbackErr)
+				return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to call GetTotalTrafficBetween: %v; fallback error: %w", err, fallbackErr)
 			}
-			return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to call vnstat: %w", err)
+			return fallbackUp, fallbackDown, fallbackUpSpeed, fallbackDownSpeed, fmt.Errorf("failed to call GetTotalTrafficBetween: %w", err)
 		}
 
-		// 使用vnstat数据计算当月（到重置日）的流量使用量
-		for interfaceName, interfaceData := range vnstatData {
+		for interfaceName, stats := range nicStatics {
 			if shouldInclude(interfaceName, includeNics, excludeNics) {
-				monthlyRx, monthlyTx := calculateMonthlyUsage(interfaceData, flags.MonthRotate)
-				totalUp += monthlyTx
-				totalDown += monthlyRx
+				totalUp += stats.Tx
+				totalDown += stats.Rx
 			}
 		}
 
@@ -327,17 +252,7 @@ func InterfaceList() ([]string, error) {
 	includeNics := parseNics(flags.IncludeNics)
 	excludeNics := parseNics(flags.ExcludeNics)
 	interfaces := []string{}
-	if flags.MonthRotate != 0 {
-		vnstatData, err := getVnstatData()
-		if err == nil {
-			for interfaceName := range vnstatData {
-				if shouldInclude(interfaceName, includeNics, excludeNics) {
-					interfaces = append(interfaces, interfaceName)
-				}
-			}
-			return interfaces, nil
-		}
-	}
+
 	ioCounters, err := net.IOCounters(true)
 	if err != nil {
 		return nil, err

@@ -6,3 +6,4 @@ komari-agent
 .komari-agent.exe.old
 build/
 auto-discovery.json
+net_static.json

@@ -8,6 +8,7 @@ import (
 
 	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
+	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 	"github.com/komari-monitor/komari-agent/server"
 	"github.com/komari-monitor/komari-agent/update"
@@ -27,6 +28,23 @@ var RootCmd = &cobra.Command{
 
 		if !flags.DisableWebSsh {
 			go WarnKomariRunning()
+		}
+
+		if flags.MonthRotate != 0 {
+			err := netstatic.StartOrContinue()
+			if err != nil {
+				log.Println("Failed to start netstatic monitoring:", err)
+			}
+			nics, err := monitoring.InterfaceList()
+			if err != nil {
+				log.Println("Failed to get interface list for netstatic:", err)
+			}
+			err = netstatic.SetNewConfig(netstatic.NetStaticConfig{
+				Nics: nics,
+			})
+			if err != nil {
+				log.Println("Failed to set netstatic config:", err)
+			}
 		}
 
 		log.Println("Komari Agent", update.CurrentVersion)
