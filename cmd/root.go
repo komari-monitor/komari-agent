@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"crypto/tls"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
@@ -20,6 +23,15 @@ var RootCmd = &cobra.Command{
 	Short: "komari agent",
 	Long:  `komari agent`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// 捕获中止信号，优雅退出
+		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		go func() {
+			<-stopCtx.Done()
+			log.Printf("shutting down gracefully...")
+			netstatic.Stop()
+			os.Exit(0)
+		}()
 
 		if flags.ShowWarning {
 			ShowToast()

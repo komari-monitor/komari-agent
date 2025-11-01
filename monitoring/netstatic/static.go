@@ -245,6 +245,39 @@ func flushCacheLocked(ts uint64) {
 	staticCache = make(map[string][]TrafficData)
 }
 
+// startGoroutinesLocked 启动采集和保存的 goroutines（调用前必须已持有锁）
+func startGoroutinesLocked() {
+	// 采集 goroutine
+	go func() {
+		for {
+			select {
+			case <-detectTicker.C:
+				mu.Lock()
+				sampleOnceLocked()
+				mu.Unlock()
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+
+	// 保存 goroutine
+	go func() {
+		for {
+			select {
+			case t := <-saveTicker.C:
+				mu.Lock()
+				flushCacheLocked(uint64(t.Unix()))
+				purgeExpiredLocked()
+				_ = saveToFileLocked()
+				mu.Unlock()
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+}
+
 // GetNetStatic 获取当前的所有流量统计数据
 func GetNetStatic() (*NetStatic, error) {
 	mu.RLock()
@@ -281,35 +314,8 @@ func StartOrContinue() error {
 	stopCh = make(chan struct{})
 	running = true
 
-	// 采集 goroutine
-	go func() {
-		for {
-			select {
-			case <-detectTicker.C:
-				mu.Lock()
-				sampleOnceLocked()
-				mu.Unlock()
-			case <-stopCh:
-				return
-			}
-		}
-	}()
-
-	// 保存 goroutine
-	go func() {
-		for {
-			select {
-			case t := <-saveTicker.C:
-				mu.Lock()
-				flushCacheLocked(uint64(t.Unix()))
-				purgeExpiredLocked()
-				_ = saveToFileLocked()
-				mu.Unlock()
-			case <-stopCh:
-				return
-			}
-		}
-	}()
+	// 启动 goroutines
+	startGoroutinesLocked()
 	return nil
 }
 
@@ -476,14 +482,22 @@ func SetNewConfig(newCfg NetStaticConfig) error {
 	config = cfg
 	// 重新配置 ticker（若运行中）
 	if running {
+		// 先停止旧的 ticker 和 goroutines
 		if detectTicker != nil {
 			detectTicker.Stop()
 		}
 		if saveTicker != nil {
 			saveTicker.Stop()
 		}
+		close(stopCh)
+
+		// 重新创建 ticker 和 channel
 		detectTicker = time.NewTicker(time.Duration(cfg.DetectInterval * float64(time.Second)))
 		saveTicker = time.NewTicker(time.Duration(cfg.SaveInterval * float64(time.Second)))
+		stopCh = make(chan struct{})
+
+		// 重新启动 goroutines
+		startGoroutinesLocked()
 
 		// 当配置了指定网卡白名单时，清理不在白名单内的缓存与上次计数，避免无用数据积累
 		if len(cfg.Nics) > 0 {
