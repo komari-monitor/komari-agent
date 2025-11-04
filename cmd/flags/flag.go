@@ -22,4 +22,7 @@ var (
 	CustomDNS            string
 	EnableGPU            bool // 启用详细GPU监控
 	ShowWarning          bool // Windows 上显示安全警告，作为子进程运行一次
+	CustomIpv4           string
+	CustomIpv6           string
+	GetIpAddrFromNic     bool // 从网卡获取IP地址
 )

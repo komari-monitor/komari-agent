@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 )
 
@@ -119,16 +120,101 @@ func GetIPv6Address() (string, error) {
 }
 
 func GetIPAddress() (ipv4, ipv6 string, err error) {
-	ipv4, err = GetIPv4Address()
-	if err != nil {
-		log.Printf("Get IPV4 Error: %v", err)
-		ipv4 = ""
+
+	if flags.GetIpAddrFromNic {
+		allowNics, err := InterfaceList()
+		if err != nil {
+			log.Printf("Get Interface List Error: %v", err)
+		} else {
+			ipv4, ipv6 = getIPFromInterfaces(allowNics)
+			if ipv4 != "" || ipv6 != "" {
+				log.Printf("Get IP from NIC - IPv4: %s, IPv6: %s", ipv4, ipv6)
+				return ipv4, ipv6, nil
+			}
+		}
 	}
-	ipv6, err = GetIPv6Address()
-	if err != nil {
-		log.Printf("Get IPV6 Error: %v", err)
-		ipv6 = ""
+
+	if flags.CustomIpv4 != "" {
+		ipv4 = flags.CustomIpv4
+	} else {
+		ipv4, err = GetIPv4Address()
+		if err != nil {
+			log.Printf("Get IPV4 Error: %v", err)
+			ipv4 = ""
+		}
+	}
+	if flags.CustomIpv6 != "" {
+		ipv6 = flags.CustomIpv6
+	} else {
+		ipv6, err = GetIPv6Address()
+		if err != nil {
+			log.Printf("Get IPV6 Error: %v", err)
+			ipv6 = ""
+		}
 	}
 
 	return ipv4, ipv6, nil
+}
+
+// getIPFromInterfaces 从指定的网卡接口获取 IPv4 和 IPv6 地址
+func getIPFromInterfaces(nicNames []string) (ipv4, ipv6 string) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		log.Printf("Failed to get network interfaces: %v", err)
+		return "", ""
+	}
+	for _, iface := range interfaces {
+		// 检查接口是否在允许列表中
+		if !func(slice []string, item string) bool {
+			for _, s := range slice {
+				if s == item {
+					return true
+				}
+			}
+			return false
+		}(nicNames, iface.Name) {
+			continue
+		}
+
+		// 跳过未启动的接口
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			// 获取 IPv4 地址
+			if ipv4 == "" && ip.To4() != nil {
+				ipv4 = ip.String()
+			}
+
+			// 获取 IPv6 地址（排除链路本地地址）
+			if ipv6 == "" && ip.To4() == nil && !ip.IsLinkLocalUnicast() {
+				ipv6 = ip.String()
+			}
+
+			// 如果已经找到 IPv4 和 IPv6,提前返回
+			if ipv4 != "" && ipv6 != "" {
+				return ipv4, ipv6
+			}
+		}
+	}
+
+	return ipv4, ipv6
 }
