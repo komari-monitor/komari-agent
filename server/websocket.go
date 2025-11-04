@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
 	"github.com/komari-monitor/komari-agent/terminal"
+	"github.com/komari-monitor/komari-agent/utils"
 	"github.com/komari-monitor/komari-agent/ws"
 )
 
@@ -21,6 +22,13 @@ func EstablishWebSocketConnection() {
 
 	websocketEndpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/report?token=" + flags.Token
 	websocketEndpoint = "ws" + strings.TrimPrefix(websocketEndpoint, "http")
+
+	// 转换中文域名为 ASCII 兼容编码
+	if convertedEndpoint, err := utils.ConvertIDNToASCII(websocketEndpoint); err == nil {
+		websocketEndpoint = convertedEndpoint
+	} else {
+		log.Printf("Warning: Failed to convert WebSocket IDN to ASCII: %v", err)
+	}
 
 	var conn *ws.SafeConn
 	defer func() {
@@ -154,6 +162,13 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 func establishTerminalConnection(token, id, endpoint string) {
 	endpoint = strings.TrimSuffix(endpoint, "/") + "/api/clients/terminal?token=" + token + "&id=" + id
 	endpoint = "ws" + strings.TrimPrefix(endpoint, "http")
+
+	// 转换中文域名为 ASCII 兼容编码
+	if convertedEndpoint, err := utils.ConvertIDNToASCII(endpoint); err == nil {
+		endpoint = convertedEndpoint
+	} else {
+		log.Printf("Warning: Failed to convert Terminal WebSocket IDN to ASCII: %v", err)
+	}
 
 	// 使用与主 WS 相同的拨号策略
 	dialer := newWSDialer()

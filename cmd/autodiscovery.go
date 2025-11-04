@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 
 	"github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/utils"
 )
 
 // AutoDiscoveryConfig 自动发现配置结构体
@@ -109,6 +110,14 @@ func registerWithAutoDiscovery() error {
 	if len(endpoint) > 0 && endpoint[len(endpoint)-1] == '/' {
 		endpoint = endpoint[:len(endpoint)-1]
 	}
+
+	// 转换中文域名为 ASCII 兼容编码
+	endpoint, err = utils.ConvertIDNToASCII(endpoint)
+	if err != nil {
+		log.Printf("Warning: Failed to convert IDN to ASCII: %v", err)
+		// 继续使用原始 endpoint，可能在某些情况下仍能工作
+	}
+
 	registerURL := fmt.Sprintf("%s/api/clients/register?name=%s", endpoint, url.QueryEscape(hostname))
 
 	// 创建HTTP请求
@@ -120,7 +129,7 @@ func registerWithAutoDiscovery() error {
 	// 设置请求头
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", flags.AutoDiscoveryKey))
-	
+
 	// 添加Cloudflare Access头部
 	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
 		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
