@@ -3,6 +3,7 @@ package terminal
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -40,41 +41,69 @@ func StartTerminal(conn *websocket.Conn) {
 		return
 	}
 
-	errChan := make(chan error, 1)
-	defer impl.term.Close()
+	errChan := make(chan error, 3) // 增加容量以容纳多个错误源
+	done := make(chan struct{})
+
+	defer func() {
+		gracefulShutdown(impl.term)
+		impl.term.Close()
+		conn.Close()
+		close(done)
+	}()
+
 	// 从 WebSocket 读取消息并写入终端
-	go handleWebSocketInput(conn, impl.term, errChan)
+	go handleWebSocketInput(conn, impl.term, errChan, done)
 
 	// 从终端读取输出并写入 WebSocket
-	go handleTerminalOutput(conn, impl.term, errChan)
+	go handleTerminalOutput(conn, impl.term, errChan, done)
 
-	// 错误处理和清理
-	go func() {
-		err := <-errChan
-		if err != nil && conn != nil {
-			conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v\r\n", err)))
-			conn.Close()
+	// 等待终端进程结束或出现错误
+	select {
+	case err := <-errChan:
+		// WebSocket 连接断开或出现错误
+		if err != nil {
+			conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nConnection error: %v\r\n", err)))
 		}
-		impl.term.Close()
-	}()
-	// 等待终端进程结束
-	if err := impl.term.Wait(); err != nil {
-		select {
-		case errChan <- err:
-			// 错误已发送
-		default:
-			// 错误通道已满或已关闭
-			conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Terminal exited with error: %v\r\n", err)))
-		}
+	case <-done:
+		// 已经被其他地方关闭
 	}
 }
 
+// gracefulShutdown 尝试优雅地关闭终端
+func gracefulShutdown(term Terminal) {
+	//  Ctrl+C
+	for i := 0; i < 3; i++ {
+		if _, err := term.Write([]byte{3}); err != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	//  Ctrl+D (EOF)
+	term.Write([]byte{4})
+	time.Sleep(100 * time.Millisecond)
+
+	term.Write([]byte("exit\n"))
+	time.Sleep(100 * time.Millisecond)
+}
+
 // handleWebSocketInput 处理 WebSocket 输入
-func handleWebSocketInput(conn *websocket.Conn, term Terminal, errChan chan<- error) {
+func handleWebSocketInput(conn *websocket.Conn, term Terminal, errChan chan<- error, done <-chan struct{}) {
 	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+
 		t, p, err := conn.ReadMessage()
 		if err != nil {
-			errChan <- err
+			select {
+			case errChan <- err:
+			default:
+			}
 			return
 		}
 		if t == websocket.TextMessage {
@@ -106,16 +135,28 @@ func handleWebSocketInput(conn *websocket.Conn, term Terminal, errChan chan<- er
 }
 
 // handleTerminalOutput 处理终端输出
-func handleTerminalOutput(conn *websocket.Conn, term Terminal, errChan chan<- error) {
+func handleTerminalOutput(conn *websocket.Conn, term Terminal, errChan chan<- error, done <-chan struct{}) {
 	buf := make([]byte, 4096)
 	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+
 		n, err := term.Read(buf)
 		if err != nil {
-			errChan <- err
+			select {
+			case errChan <- err:
+			default:
+			}
 			return
 		}
 		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-			errChan <- err
+			select {
+			case errChan <- err:
+			default:
+			}
 			return
 		}
 	}

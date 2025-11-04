@@ -29,7 +29,7 @@ func newTerminalImpl() (*terminalImpl, error) {
 					parts := strings.Split(line, ":")
 					if len(parts) >= 7 && parts[6] != "" {
 						shell = parts[6]
-						log.Printf("Found shell from /etc/passwd: %s for user home: %s\n", shell, userHomeDir)
+						//log.Printf("Found shell from /etc/passwd: %s for user home: %s\n", shell, userHomeDir)
 						break
 					}
 				}

@@ -7,3 +7,4 @@ komari-agent
 build/
 auto-discovery.json
 net_static.json
+config.json
