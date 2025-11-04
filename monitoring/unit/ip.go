@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 )
 

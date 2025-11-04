@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/ws"
 	ping "github.com/prometheus-community/pro-bing"
 )

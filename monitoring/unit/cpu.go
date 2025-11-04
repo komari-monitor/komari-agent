@@ -8,8 +8,11 @@ import (
 	"strings"
 	"time"
 
+	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/shirou/gopsutil/v4/cpu"
 )
+
+var flags = pkg_flags.GlobalConfig
 
 type CpuInfo struct {
 	CPUName         string  `json:"cpu_name"`

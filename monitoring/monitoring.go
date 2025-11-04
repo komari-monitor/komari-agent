@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/komari-monitor/komari-agent/cmd/flags"
+	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 )
+
+var flags = pkg_flags.GlobalConfig
 
 func GenerateReport() []byte {
 	message := ""
@@ -92,7 +94,7 @@ func GenerateReport() []byte {
 			// 成功获取详细信息
 			gpuData := make([]map[string]interface{}, len(gpuInfo))
 			totalGPUUsage := 0.0
-			
+
 			for i, info := range gpuInfo {
 				gpuData[i] = map[string]interface{}{
 					"name":         info.Name,
@@ -103,13 +105,13 @@ func GenerateReport() []byte {
 				}
 				totalGPUUsage += info.Utilization
 			}
-			
+
 			avgGPUUsage := totalGPUUsage / float64(len(gpuInfo))
-			
+
 			data["gpu"] = map[string]interface{}{
-				"count":          len(gpuInfo),
-				"average_usage":  avgGPUUsage,
-				"detailed_info":  gpuData,
+				"count":         len(gpuInfo),
+				"average_usage": avgGPUUsage,
+				"detailed_info": gpuData,
 			}
 		}
 	}

@@ -9,11 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 	"github.com/komari-monitor/komari-agent/update"
+
+	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
+
+var flags = pkg_flags.GlobalConfig
 
 func DoUploadBasicInfoWorks() {
 	ticker := time.NewTicker(time.Duration(flags.InfoReportInterval) * time.Minute)

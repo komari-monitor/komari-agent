@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/shirou/gopsutil/v4/disk"
 )
 

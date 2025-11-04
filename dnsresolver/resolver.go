@@ -12,9 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/komari-monitor/komari-agent/cmd/flags"
+	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
 
+var flags = pkg_flags.GlobalConfig
 var (
 	DNSServers = []string{
 		"[2606:4700:4700::1111]:53", // Cloudflare IPv6

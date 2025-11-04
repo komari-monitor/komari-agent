@@ -2,8 +2,6 @@ package monitoring
 
 import (
 	"testing"
-
-	"github.com/komari-monitor/komari-agent/cmd/flags"
 )
 
 func TestConnectionsCount(t *testing.T) {

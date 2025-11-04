@@ -3,26 +3,44 @@ package cmd
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
+	"strconv"
+	"strings"
 	"syscall"
 
-	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 	"github.com/komari-monitor/komari-agent/server"
 	"github.com/komari-monitor/komari-agent/update"
 	"github.com/spf13/cobra"
+
+	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
+
+var flags = pkg_flags.GlobalConfig
 
 var RootCmd = &cobra.Command{
 	Use:   "komari-agent",
 	Short: "komari agent",
 	Long:  `komari agent`,
 	Run: func(cmd *cobra.Command, args []string) {
+		loadFromEnv() // 从环境变量加载配置，覆盖解析
+		if flags.ConfigFile != "" {
+			bytes, err := os.ReadFile(flags.ConfigFile)
+			if err != nil {
+				log.Fatalf("Failed to read config file: %v", err)
+			}
+			err = json.Unmarshal(bytes, flags)
+			if err != nil {
+				log.Fatalf("Failed to parse config file: %v", err)
+			}
+		}
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -157,5 +175,46 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv4, "custom-ipv4", "", "Custom IPv4 address to use")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv6, "custom-ipv6", "", "Custom IPv6 address to use")
 	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")
+	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
+}
+
+func loadFromEnv() {
+	val := reflect.ValueOf(flags).Elem()
+	typ := val.Type()
+
+	for i := 0; i < val.NumField(); i++ {
+		field := val.Field(i)
+		fieldType := typ.Field(i)
+
+		// Get the env tag
+		envTag := fieldType.Tag.Get("env")
+		if envTag == "" {
+			continue
+		}
+
+		// Get the environment variable value
+		envValue := os.Getenv(envTag)
+		if envValue == "" {
+			continue
+		}
+
+		// Set the field based on its type
+		switch field.Kind() {
+		case reflect.String:
+			field.SetString(envValue)
+		case reflect.Bool:
+			if strings.ToLower(envValue) == "true" || envValue == "1" {
+				field.SetBool(true)
+			}
+		case reflect.Int:
+			if intVal, err := strconv.Atoi(envValue); err == nil {
+				field.SetInt(int64(intVal))
+			}
+		case reflect.Float64:
+			if floatVal, err := strconv.ParseFloat(envValue, 64); err == nil {
+				field.SetFloat(floatVal)
+			}
+		}
+	}
 }

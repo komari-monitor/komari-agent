@@ -5,8 +5,11 @@ import (
 	"fmt"
 
 	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari-agent/cmd/flags"
+
+	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
+
+var flags = pkg_flags.GlobalConfig
 
 // Terminal 接口定义平台特定的终端操作
 type Terminal interface {

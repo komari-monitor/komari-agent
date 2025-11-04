@@ -3,7 +3,6 @@ package monitoring
 import (
 	"runtime"
 
-	"github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/shirou/gopsutil/v4/mem"
 )
 
