@@ -103,6 +103,19 @@ func getFromLspci() string {
 func getFromSysfsDRM() string {
 	matches, _ := filepath.Glob("/sys/class/drm/card*")
 
+	excludedDrivers := map[string]bool{
+		"virtio-pci": true,
+		"virtio_gpu": true,
+		"bochs-drm":  true,
+		"qxl":        true,
+		"vmwgfx":     true,
+		"cirrus":     true,
+		"vboxvideo":  true,
+		"hyperv_fb":  true,
+		"simpledrm":  true,
+		"simplefb":   true,
+	}
+
 	for _, path := range matches {
 		// 驱动名称
 		driverLink, err := os.Readlink(filepath.Join(path, "device", "driver"))
@@ -110,6 +123,10 @@ func getFromSysfsDRM() string {
 			continue
 		}
 		driverName := filepath.Base(driverLink)
+
+		if excludedDrivers[driverName] {
+			continue
+		}
 
 		// 设备树 compatible 提取具体型号
 		// /sys/class/drm/card0/device/of_node/compatible
