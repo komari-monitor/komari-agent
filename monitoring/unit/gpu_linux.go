@@ -104,16 +104,18 @@ func getFromSysfsDRM() string {
 	matches, _ := filepath.Glob("/sys/class/drm/card*")
 
 	excludedDrivers := map[string]bool{
-		"virtio-pci": true,
-		"virtio_gpu": true,
-		"bochs-drm":  true,
-		"qxl":        true,
-		"vmwgfx":     true,
-		"cirrus":     true,
-		"vboxvideo":  true,
-		"hyperv_fb":  true,
-		"simpledrm":  true,
-		"simplefb":   true,
+		"virtio-pci":  true,
+		"virtio_gpu":  true,
+		"bochs-drm":   true,
+		"qxl":         true,
+		"vmwgfx":      true,
+		"cirrus":      true,
+		"vboxvideo":   true,
+		"hyperv_fb":   true,
+		"simpledrm":   true,
+		"simplefb":    true,
+		"cirrus-qemu": true,
+		"ast":         true, //some LXC containers
 	}
 
 	for _, path := range matches {
