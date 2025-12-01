@@ -115,7 +115,6 @@ func getFromSysfsDRM() string {
 		"simpledrm":   true,
 		"simplefb":    true,
 		"cirrus-qemu": true,
-		"ast":         true, //some LXC containers
 	}
 
 	for _, path := range matches {
@@ -160,10 +159,12 @@ func getFromSysfsDRM() string {
 			return "Allwinner Display Engine"
 		case "tegra":
 			return "NVIDIA Tegra"
+		case "ast": // LXC 容器映射物理显卡
+			return "ASPEED Technology, Inc. ASPEED Graphics Family"
 		}
 
 		if driverName != "" {
-			return "SoC GPU (" + driverName + ")"
+			return "Direct Render Manager " + driverName
 		}
 	}
 
