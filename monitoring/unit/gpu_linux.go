@@ -145,9 +145,9 @@ func getFromSysfsDRM() string {
 
 		// 通用的驱动名称映射
 		switch driverName {
-		case "vc4":
+		case "vc4", "vc4-drm":
 			return "Broadcom VideoCore IV/VI (Raspberry Pi)"
-		case "v3d":
+		case "v3d", "v3d-drm":
 			return "Broadcom V3D (Raspberry Pi 4/5)"
 		case "msm", "msm_drm":
 			return "Qualcomm Adreno (Unknown Model)"
@@ -161,6 +161,10 @@ func getFromSysfsDRM() string {
 			return "NVIDIA Tegra"
 		case "ast": // LXC 容器映射物理显卡
 			return "ASPEED Technology, Inc. ASPEED Graphics Family"
+		case "i915", "i915-drm":
+			return "Intel Integrated Graphics"
+		case "mgag200":
+			return "Matrox G200 Series"
 		}
 
 		if driverName != "" {
@@ -209,7 +213,7 @@ func parseSocModel(driver string, rawBytes []byte) string {
 	}
 
 	// 树莓派 VideoCore
-	if driver == "vc4" || driver == "v3d" {
+	if driver == "vc4" || driver == "vc4-drm" || driver == "v3d" {
 		if strings.Contains(lower, "bcm2712") {
 			return "Broadcom VideoCore VII (Pi 5)"
 		}
