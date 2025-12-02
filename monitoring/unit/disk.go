@@ -77,6 +77,7 @@ func isPhysicalDisk(part disk.PartitionStat) bool {
 		"/etc/resolv.conf",
 		"/etc/host", // /etc/hosts,/etc/hostname
 		"/dev/hugepages",
+		"/nix/store",
 	}
 	for _, mp := range mountpointsToExclude {
 		if mountpoint == mp || strings.HasPrefix(mountpoint, mp) {
