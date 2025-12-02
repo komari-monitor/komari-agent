@@ -200,11 +200,7 @@ func Ram() RamInfo {
 	}
 
 	if runtime.GOOS == "linux" {
-		h := CallFree()
-		if h.Total > 0 {
-			return h
-		}
-		h = GetMemHtopLike()
+		h := GetMemHtopLike()
 		if h.Total > 0 {
 			return h
 		}
