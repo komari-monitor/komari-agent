@@ -14,6 +14,7 @@ type DiskInfo struct {
 
 func Disk() DiskInfo {
 	diskinfo := DiskInfo{}
+	// 获取所有分区，使用 true 避免物理磁盘被 gopsutil 错误排除
 	usage, err := disk.Partitions(true)
 	if err != nil {
 		diskinfo.Total = 0
@@ -107,7 +108,8 @@ func isPhysicalDisk(part disk.PartitionStat) bool {
 	}
 
 	fstype := strings.ToLower(part.Fstype)
-	// // 针对 Linux autofs：它只是自动挂载的触发器，真实文件系统会作为单独分区出现。
+
+	// 针对 Linux autofs：排除自动挂载的 trigger，真实文件系统会作为单独分区出现不会被排除。
 	// 将 autofs 视为“非物理磁盘”可以避免重复统计容量。
 	if fstype == "autofs" && !strings.HasPrefix(part.Device, "/dev/") {
 		return false
