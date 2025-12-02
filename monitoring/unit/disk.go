@@ -107,6 +107,12 @@ func isPhysicalDisk(part disk.PartitionStat) bool {
 	}
 
 	fstype := strings.ToLower(part.Fstype)
+	// // 针对 Linux autofs：它只是自动挂载的触发器，真实文件系统会作为单独分区出现。
+	// 将 autofs 视为“非物理磁盘”可以避免重复统计容量。
+	if fstype == "autofs" && !strings.HasPrefix(part.Device, "/dev/") {
+		return false
+	}
+
 	// 针对 Linux 下通过 ntfs-3g 挂载的 NTFS 分区 (fuseblk)，这是实际物理磁盘，不应排除
 	if fstype == "fuseblk" {
 		return true
