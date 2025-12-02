@@ -14,7 +14,7 @@ type DiskInfo struct {
 
 func Disk() DiskInfo {
 	diskinfo := DiskInfo{}
-	usage, err := disk.Partitions(false)
+	usage, err := disk.Partitions(true)
 	if err != nil {
 		diskinfo.Total = 0
 		diskinfo.Used = 0
