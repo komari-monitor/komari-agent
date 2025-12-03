@@ -157,6 +157,10 @@ uninstall_previous() {
         /etc/init.d/${service_name} stop
         /etc/init.d/${service_name} disable
         rm -f "/etc/init.d/${service_name}"
+    elif command -v initctl >/dev/null 2>&1 && [ -f "/etc/init/${service_name}.conf" ]; then
+        log_info "Stopping and removing existing upstart service..."
+        initctl stop ${service_name}
+        rm -f "/etc/init/${service_name}.conf"
     elif [ "$os_name" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
         # macOS launchd service - check both system and user locations
         system_plist="/Library/LaunchDaemons/com.komari.${service_name}.plist"
@@ -401,6 +405,12 @@ detect_init_system() {
         echo "openrc"
         return
     fi
+
+    # check for Upstart (CentOS 6)
+    if command -v initctl >/dev/null 2>&1 && [ -d /etc/init ]; then
+        echo "upstart"
+        return
+    fi
     
     echo "unknown"
 }
@@ -597,6 +607,37 @@ EOF
             exit 1
         fi
     fi
+elif [ "$init_system" = "upstart" ]; then
+    # Upstart service configuration
+    log_info "Using upstart for service management"
+    service_file="/etc/init/${service_name}.conf"
+    cat > "$service_file" << EOF
+# KOMARI Agent
+description "Komari Agent Service"
+
+chdir ${target_dir}
+start on filesystem or runlevel [2345]
+stop on runlevel [!2345]
+
+respawn
+respawn limit 10 5
+umask 022
+
+console none
+
+pre-start script
+    test -x ${komari_agent_path} || { stop; exit 0; }
+end script
+
+# Start
+script
+    exec ${komari_agent_path} ${komari_args}
+end script
+EOF
+    # enable Upstart unit
+    initctl reload-configuration
+    initctl start ${service_name}
+    log_success "Upstart service configured and started"
 else
     log_error "Unsupported or unknown init system detected: $init_system"
     log_error "Supported init systems: systemd, openrc, procd, launchd"
