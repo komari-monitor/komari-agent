@@ -14,6 +14,7 @@ type DiskInfo struct {
 
 func Disk() DiskInfo {
 	diskinfo := DiskInfo{}
+	// 获取所有分区，使用 true 避免物理磁盘被 gopsutil 错误排除
 	usage, err := disk.Partitions(true)
 	if err != nil {
 		diskinfo.Total = 0
@@ -36,16 +37,38 @@ func Disk() DiskInfo {
 			}
 		} else {
 			// 使用默认逻辑，排除临时文件系统和网络驱动器
+			deviceMap := make(map[string]*disk.UsageStat)
+
 			for _, part := range usage {
 				if isPhysicalDisk(part) {
 					u, err := disk.Usage(part.Mountpoint)
 					if err != nil {
 						continue
+					}
+
+					deviceID := part.Device
+					// ZFS去重: 基于 pool 名称 (例如 pool/dataset -> pool)
+					if strings.ToLower(part.Fstype) == "zfs" {
+						if idx := strings.Index(deviceID, "/"); idx != -1 {
+							deviceID = deviceID[:idx]
+						}
+					}
+
+					// 如果该设备已存在，且当前挂载点的 Total 更大，则替换（处理 quota 等情况）
+					// 否则保留现有的（通常我们希望统计物理 pool 的总量）
+					if existing, ok := deviceMap[deviceID]; ok {
+						if u.Total > existing.Total {
+							deviceMap[deviceID] = u
+						}
 					} else {
-						diskinfo.Total += u.Total
-						diskinfo.Used += u.Used
+						deviceMap[deviceID] = u
 					}
 				}
+			}
+
+			for _, u := range deviceMap {
+				diskinfo.Total += u.Total
+				diskinfo.Used += u.Used
 			}
 		}
 	}
@@ -86,6 +109,13 @@ func isPhysicalDisk(part disk.PartitionStat) bool {
 	}
 
 	fstype := strings.ToLower(part.Fstype)
+
+	// 针对 Linux autofs：排除自动挂载的 trigger，真实文件系统会作为单独分区出现不会被排除。
+	// 将 autofs 视为“非物理磁盘”可以避免重复统计容量。
+	if fstype == "autofs" && !strings.HasPrefix(part.Device, "/dev/") {
+		return false
+	}
+
 	// 针对 Linux 下通过 ntfs-3g 挂载的 NTFS 分区 (fuseblk)，这是实际物理磁盘，不应排除
 	if fstype == "fuseblk" {
 		return true
