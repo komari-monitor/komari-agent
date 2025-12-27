@@ -17,6 +17,12 @@ func ProcessCount() (count int) {
 func processCountLinux() (count int) {
 	procDir := "/proc"
 
+	if flags.HostProc != "" {
+		if info, err := os.Stat(flags.HostProc); err == nil && info.IsDir() {
+			procDir = flags.HostProc
+		}
+	}
+
 	entries, err := os.ReadDir(procDir)
 	if err != nil {
 		return 0

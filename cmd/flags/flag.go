@@ -26,6 +26,7 @@ type Config struct {
 	CustomIpv4           string  `json:"custom_ipv4" env:"AGENT_CUSTOM_IPV4"`                         // 自定义 IPv4 地址
 	CustomIpv6           string  `json:"custom_ipv6" env:"AGENT_CUSTOM_IPV6"`                         // 自定义 IPv6 地址
 	GetIpAddrFromNic     bool    `json:"get_ip_addr_from_nic" env:"AGENT_GET_IP_ADDR_FROM_NIC"`       // 从网卡获取IP地址
+	HostProc             string  `json:"host_proc" env:"HOST_PROC"`                                   // 容器环境下宿主机/proc目录的挂载点，用于监控宿主机进程
 	ConfigFile           string  `json:"config_file" env:"AGENT_CONFIG_FILE"`                         // JSON配置文件路径
 
 }
