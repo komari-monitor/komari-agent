@@ -26,6 +26,11 @@ func OSName() string {
 		return synologyName
 	}
 
+	// Check if it's a fnOS
+	if fnOSName := detectFnOS(); fnOSName != "" {
+		return fnOSName
+	}
+
 	file, err := os.Open("/etc/os-release")
 	if err != nil {
 		return "Linux"
@@ -45,6 +50,21 @@ func OSName() string {
 	}
 
 	return "Linux"
+}
+
+func detectFnOS() string {
+	if info, err := os.Stat("/usr/trim/BUILD_VERSION"); err == nil && !info.IsDir() {
+		if data, err := os.ReadFile("/usr/trim/BUILD_VERSION"); err == nil {
+			// format like "1.1.11"
+			if version := strings.TrimSpace(string(data)); version != "" {
+				return "fnOS " + version
+			}
+		}
+	}
+	if info, err := os.Stat("/usr/trim"); err == nil && info.IsDir() {
+		return "fnOS"
+	}
+	return ""
 }
 
 func detectSynology() string {
