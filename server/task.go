@@ -169,7 +169,7 @@ func tcpPing(target string, timeout time.Duration) (int64, error) {
 	return time.Since(start).Milliseconds(), nil
 }
 
-func httpPing(target string, timeout time.Duration) (int64, error) {
+func httpPing(target string, timeout time.Duration) (int64, int64, error) {
 	// Handle raw IPv6 address for URL
 	if strings.Contains(target, ":") && !strings.Contains(target, "[") {
 		// check if it's a valid IP to avoid wrapping hostnames
@@ -200,16 +200,20 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 		},
 	}
 	start := time.Now()
-	resp, err := client.Get(target)
+	resp, err := client.Head(target)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
-		return -1, err
+		return -1, 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		return latency, nil
+	if resp.TLS != nil {
+		expireTime := resp.TLS.PeerCertificates[0].NotAfter
+		return latency, int64(expireTime.Sub(start).Hours()), nil
 	}
-	return latency, errors.New("http status not ok")
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return latency, 0, nil
+	}
+	return latency, 0, errors.New("http status not ok: " + resp.Status)
 }
 
 func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
@@ -219,31 +223,35 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	}
 	var err error = nil
 	var latency int64
+	var certsExpireTime int64 // 证书过期时间
 	pingResult := -1
 	timeout := 3 * time.Second        // 默认超时时间
 	const highLatencyThreshold = 1000 // ms 阈值
 
-	measure := func() (int64, error) {
+	measure := func() (int64, int64, error) {
 		switch pingType {
 		case "icmp":
-			return icmpPing(pingTarget, timeout)
+			latency, err = icmpPing(pingTarget, timeout)
+			return latency, 0, err
 		case "tcp":
-			return tcpPing(pingTarget, timeout)
+			latency, err = icmpPing(pingTarget, timeout)
+			return latency, 0, err
 		case "http":
 			return httpPing(pingTarget, timeout)
 		default:
-			return -1, errors.New("unsupported ping type")
+			return -1, 0, errors.New("unsupported ping type")
 		}
 	}
 	PingHighLatencyRetries := 3
 	// 首次测量
-	if latency, err = measure(); err == nil {
+	if latency, certsExpireTime, err = measure(); err == nil {
 		if latency > int64(highLatencyThreshold) && PingHighLatencyRetries > 0 {
 			attempts := PingHighLatencyRetries
 			for i := 0; i < attempts; i++ {
-				if second, err2 := measure(); err2 == nil {
+				if second, expireTime, err2 := measure(); err2 == nil {
 					if second <= int64(highLatencyThreshold) {
 						latency = second
+						certsExpireTime = expireTime
 						break
 					}
 					if i == attempts-1 { // 最后一次仍高
@@ -264,11 +272,12 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 		pingResult = int(latency)
 	}
 	payload := map[string]interface{}{
-		"type":        "ping_result",
-		"task_id":     taskID,
-		"ping_type":   pingType,
-		"value":       pingResult,
-		"finished_at": time.Now(),
+		"type":              "ping_result",
+		"task_id":           taskID,
+		"ping_type":         pingType,
+		"value":             pingResult,
+		"certs_expire_time": certsExpireTime,
+		"finished_at":       time.Now(),
 	}
 	// https://github.com/komari-monitor/komari/commit/eb87a4fc330b7d1c407fa4ff70177615a4f50a1f
 	// -1 代表丢包，服务端计算

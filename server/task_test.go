@@ -14,6 +14,7 @@ var testTargets = []struct {
 	{"v4-sh-cm.oojj.de"},
 	{"117.185.125.154"},
 	{"117.185.125.154:80"},
+	{"https://github.com/komari-monitor/komari"},
 }
 
 func TestICMPPing(t *testing.T) {
@@ -50,9 +51,12 @@ func TestHTTPPing(t *testing.T) {
 	timeout := 3 * time.Second
 	for _, tt := range testTargets {
 		t.Run(tt.target, func(t *testing.T) {
-			latency, err := httpPing(tt.target, timeout)
+			latency, certsExpireTime, err := httpPing(tt.target, timeout)
 			if latency < -1 {
 				t.Errorf("HTTP ping %s: invalid latency %d", tt.target, latency)
+			}
+			if certsExpireTime < 0 {
+				t.Errorf("HTTP ping %s: certs expire %d", tt.target, certsExpireTime)
 			}
 			if err != nil {
 				t.Errorf("HTTP ping %s error: %v", tt.target, err)
