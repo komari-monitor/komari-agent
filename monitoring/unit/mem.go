@@ -104,15 +104,15 @@ func GetMemHtopLike() RamInfo {
 			} else {
 				raminfo.Used = info.MemTotal - info.MemFree
 			}
+			raminfo.Used += info.Shmem
 
-			// Adjust for Zswap
-			if info.Zswap > 0 || info.Zswapped > 0 {
-				if raminfo.Used > info.Zswap {
-					raminfo.Used -= info.Zswap
-				} else {
-					raminfo.Used = 0
-				}
-			}
+			//if info.Zswap > 0 || info.Zswapped > 0 {
+			//	if raminfo.Used > info.Zswap {
+			//		raminfo.Used -= info.Zswap
+			//	} else {
+			//		raminfo.Used = 0
+			//	}
+			//}
 			return raminfo
 		}
 	}
