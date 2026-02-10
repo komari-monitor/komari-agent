@@ -192,6 +192,7 @@ func newWSDialer() *websocket.Dialer {
 	d := &websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
 		NetDialContext:   dnsresolver.GetDialContext(15 * time.Second),
+		Proxy:            http.ProxyFromEnvironment,
 	}
 	if flags.IgnoreUnsafeCert {
 		d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
