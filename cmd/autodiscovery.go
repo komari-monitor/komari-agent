@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/utils"
 )
 
@@ -136,7 +138,7 @@ func registerWithAutoDiscovery() error {
 	}
 
 	// 发送请求
-	client := &http.Client{}
+	client := dnsresolver.GetHTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send register request: %v", err)
