@@ -89,8 +89,9 @@ if (-not $nssmCmd) {
 # If still no usable nssm command, proceed to download
 if (-not $nssmCmd) {
     Log-Info "nssm not found or not usable. Attempting to download to $InstallDir..."
-    $NssmVersion = "2.24"
-    $NssmZipUrl = "https://nssm.cc/release/nssm-$NssmVersion.zip"
+    $NssmVersion = "2.24-103-gdee49fc"
+    $NssmVersionMain = "2.24"
+    $NssmZipUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/HandSonic/nssm/releases/download/$NssmVersionMain/nssm-$NssmVersion.zip" } else { "https://github.com/HandSonic/nssm/releases/download/$NssmVersionMain/nssm-$NssmVersion.zip" }
     $TempNssmZipPath = Join-Path $env:TEMP "nssm-$NssmVersion.zip"
     $TempExtractDir = Join-Path $env:TEMP "nssm_extract_temp"
 
