@@ -84,6 +84,9 @@ func detectContainer() string {
 	if s := parseCgroupForContainer(); s != "" {
 		return s
 	}
+	if fileExists("/dev/.lxc-boot-id") {
+		return "lxc"
+	}
 	if fileExists("/.komari-agent-container") {
 		return "container"
 	}
