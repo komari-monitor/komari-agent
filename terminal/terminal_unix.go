@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/user"
 	"strings"
 	"syscall"
 	"time"
@@ -19,14 +18,6 @@ import (
 // 它会尝试根据用户配置文件查找默认 shell，如果失败则回退到常见 shell。
 // 优先以交互模式启动 shell，如果不支持则回退到非交互模式。
 func newTerminalImpl() (*terminalImpl, error) {
-	if os.Geteuid() == 0 {
-		if loginImpl, err := startLoginTerminal(); err == nil {
-			return loginImpl, nil
-		} else {
-			log.Printf("Root login shell fallback triggered: %v\n", err)
-		}
-	}
-
 	shell := ""
 	// 从 /etc/passwd 获取用户默认 shell
 	userHomeDir, err := os.UserHomeDir() // 获取当前用户的主目录
@@ -77,14 +68,22 @@ func newTerminalImpl() (*terminalImpl, error) {
 
 	// 创建进程: 优先使用交互模式，如不支持则回退
 	cmd := exec.Command(shell, "-i") // 尝试以交互模式启动
-	cmd.Env = buildTerminalEnv()
+	cmd.Env = append(os.Environ(),   // 继承系统环境变量
+		"TERM=xterm-256color", // 设置终端类型，提高兼容性
+		"LANG=C.UTF-8",        // 设置语言环境为 UTF-8
+		"LC_ALL=C.UTF-8",      // 强制所有本地化变量为 UTF-8
+	)
 
 	tty, err := pty.Start(cmd)
 	if err != nil {
 		log.Printf("Failed to start pty with -i (%s -i): %v. Retrying without -i.\n", shell, err)
 		// 交互模式不被支持，回退到无 -i 的启动方式
 		cmd = exec.Command(shell)
-		cmd.Env = buildTerminalEnv()
+		cmd.Env = append(os.Environ(),
+			"TERM=xterm-256color",
+			"LANG=C.UTF-8",
+			"LC_ALL=C.UTF-8",
+		)
 		tty, err = pty.Start(cmd)
 		if err != nil {
 			return nil, fmt.Errorf("failed to start pty with or without -i: %v", err)
@@ -96,50 +95,6 @@ func newTerminalImpl() (*terminalImpl, error) {
 
 	return &terminalImpl{
 		shell: shell,
-		term: &unixTerminal{
-			tty: tty,
-			cmd: cmd,
-		},
-	}, nil
-}
-
-func buildTerminalEnv() []string {
-	return append(os.Environ(),
-		"TERM=xterm-256color",
-		"LANG=C.UTF-8",
-		"LC_ALL=C.UTF-8",
-	)
-}
-
-// startLoginTerminal 在 Root 场景下优先尝试使用 /bin/login -f <当前用户名>。
-// 若任一步骤失败，调用方应回退到默认 shell 启动逻辑。
-func startLoginTerminal() (*terminalImpl, error) {
-	const loginBin = "/bin/login"
-
-	if _, err := os.Stat(loginBin); err != nil {
-		return nil, fmt.Errorf("%s not available: %w", loginBin, err)
-	}
-
-	currentUser, err := user.Current()
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve current user: %w", err)
-	}
-	if currentUser.Username == "" {
-		return nil, fmt.Errorf("current username is empty")
-	}
-
-	cmd := exec.Command(loginBin, "-f", currentUser.Username)
-	cmd.Env = buildTerminalEnv()
-
-	tty, err := pty.Start(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("failed to start %s -f %s: %w", loginBin, currentUser.Username, err)
-	}
-
-	pty.Setsize(tty, &pty.Winsize{Rows: 24, Cols: 80})
-
-	return &terminalImpl{
-		shell: loginBin,
 		term: &unixTerminal{
 			tty: tty,
 			cmd: cmd,
