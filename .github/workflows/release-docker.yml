@@ -38,7 +38,7 @@ jobs:
           if [ -z "$VERSION" ]; then
             VERSION="${{ github.sha }}"
           fi
-          LDFLAGS="-s -w -X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}"
+          LDFLAGS="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}"
 
           echo "Building for linux/amd64..."
           GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o komari-agent-linux-amd64
