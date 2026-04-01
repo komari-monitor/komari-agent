@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -66,9 +67,12 @@ func newTerminalImpl() (*terminalImpl, error) {
 		return nil, fmt.Errorf("no supported shell found among %v", defaultShells)
 	}
 
-	// 创建进程: 优先使用交互模式，如不支持则回退
-	cmd := exec.Command(shell, "-i") // 尝试以交互模式启动
-	cmd.Env = append(os.Environ(),   // 继承系统环境变量
+	shellArgv0 := filepath.Base(shell)
+	shellCmd := "for f in /etc/update-motd.d/*; do [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$0\""
+
+	cmd := exec.Command(shell, "-c", shellCmd)
+	cmd.Args[0] = shellArgv0
+	cmd.Env = append(os.Environ(), // 继承系统环境变量
 		"TERM=xterm-256color", // 设置终端类型，提高兼容性
 		"LANG=C.UTF-8",        // 设置语言环境为 UTF-8
 		"LC_ALL=C.UTF-8",      // 强制所有本地化变量为 UTF-8
@@ -76,8 +80,7 @@ func newTerminalImpl() (*terminalImpl, error) {
 
 	tty, err := pty.Start(cmd)
 	if err != nil {
-		log.Printf("Failed to start pty with -i (%s -i): %v. Retrying without -i.\n", shell, err)
-		// 交互模式不被支持，回退到无 -i 的启动方式
+		// 回退到原始启动逻辑（直接启动 shell，再无参数）
 		cmd = exec.Command(shell)
 		cmd.Env = append(os.Environ(),
 			"TERM=xterm-256color",
@@ -86,7 +89,7 @@ func newTerminalImpl() (*terminalImpl, error) {
 		)
 		tty, err = pty.Start(cmd)
 		if err != nil {
-			return nil, fmt.Errorf("failed to start pty with or without -i: %v", err)
+			return nil, fmt.Errorf("failed to start pty with argv0 prelude and plain shell: %v", err)
 		}
 	}
 
