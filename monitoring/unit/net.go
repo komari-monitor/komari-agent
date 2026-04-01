@@ -35,6 +35,9 @@ var (
 		"veth":    {}, // Docker
 		"virbr":   {}, // KVM
 		"vmbr":    {}, // Proxmox
+		"tap":     {},
+		"fwbr":    {},
+		"fwpr":    {},
 	}
 )
 
