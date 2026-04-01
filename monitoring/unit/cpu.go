@@ -3,7 +3,6 @@ package monitoring
 import (
 	"bufio"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -29,19 +28,13 @@ func Cpu() CpuInfo {
 		CPUUsage:        0.0,
 	}
 
-	// 优先使用 lscpu 获取 CPU 信息
-	name, err := readCPUNameFromLscpu()
-	if err == nil && name != "" {
-		cpuinfo.CPUName = strings.TrimSpace(name)
-	} else {
-		// 如果 lscpu 无法获取 CPU 名称，尝试使用 gopsutil
-		info, err := cpu.Info()
-		if err == nil && len(info) > 0 {
-			cpuinfo.CPUName = strings.TrimSpace(info[0].ModelName)
-			if cpuinfo.CPUName == "" {
-				if info[0].VendorID != "" || info[0].Family != "" {
-					cpuinfo.CPUName = strings.TrimSpace(info[0].VendorID + " " + info[0].Family)
-				}
+	// 优先使用 gopsutil 获取 CPU 信息，避免触发 lscpu 在部分内核上的 lockdown 日志刷屏。
+	info, err := cpu.Info()
+	if err == nil && len(info) > 0 {
+		cpuinfo.CPUName = strings.TrimSpace(info[0].ModelName)
+		if cpuinfo.CPUName == "" {
+			if info[0].VendorID != "" || info[0].Family != "" {
+				cpuinfo.CPUName = strings.TrimSpace(info[0].VendorID + " " + info[0].Family)
 			}
 		}
 	}
@@ -64,28 +57,6 @@ func Cpu() CpuInfo {
 	}
 
 	return cpuinfo
-}
-
-// readCPUNameFromLscpu 从 lscpu 命令读取 CPU 名称
-func readCPUNameFromLscpu() (string, error) {
-	cmd := exec.Command("lscpu")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "Model name:") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1]), nil
-			}
-		}
-	}
-
-	return "", scanner.Err()
 }
 
 // readCPUNameFromProc 从 /proc/cpuinfo 读取 CPU 名称
