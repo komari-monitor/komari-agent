@@ -89,7 +89,7 @@ func GetIPv6Address() (string, error) {
 		"https://v6.ip.zxinc.org/info.php?type=json",
 		"https://api6.ipify.org?format=json",
 		"https://ipv6.icanhazip.com",
-		"https://api-ipv6.ip.sb/geoip",
+		"http://api-ipv6.ip.sb/geoip",
 	}
 
 	for _, api := range webAPIs {
