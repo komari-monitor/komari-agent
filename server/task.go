@@ -220,8 +220,10 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	var err error = nil
 	var latency int64
 	pingResult := -1
-	timeout := 3 * time.Second        // 默认超时时间
-	const highLatencyThreshold = 1000 // ms 阈值
+	timeout := 3 * time.Second           // 默认超时时间
+	const highLatencyThreshold = 1000    // ms 阈值
+	const retryDropThresholdTcping = 800 // ms 重试中延迟降低超过此值则基本认为发生重传
+	// 800ms = SYN/SYN-ACK 首次超时重传 1000ms - 防误判容许 200ms 延迟抖动
 
 	measure := func() (int64, error) {
 		switch pingType {
@@ -238,11 +240,16 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	PingHighLatencyRetries := 3
 	// 首次测量
 	if latency, err = measure(); err == nil {
+		firstLatency := latency
 		if latency > int64(highLatencyThreshold) && PingHighLatencyRetries > 0 {
 			attempts := PingHighLatencyRetries
 			for i := 0; i < attempts; i++ {
 				if second, err2 := measure(); err2 == nil {
 					if second <= int64(highLatencyThreshold) {
+						if pingType == "tcp" && firstLatency-second > int64(retryDropThresholdTcping) {
+							err = errors.New("suspicious retransmission detected in tcp handshake")
+							break
+						}
 						latency = second
 						break
 					}
