@@ -97,7 +97,23 @@ if (-not $nssmCmd) {
     try {
         Log-Info "Downloading nssm from $NssmZipUrl..."
         Invoke-WebRequest -Uri $NssmZipUrl -OutFile $TempNssmZipPath -UseBasicParsing
+    }
+    catch {
+        Log-Warning "Primary download failed: $_"
+        Log-Info "Attempting fallback download..."
+        $FallbackNssmZipUrl = if ($GitHubProxy) { "$GitHubProxy/https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/nssm-$NssmVersion.zip" } else { "https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/nssm-$NssmVersion.zip" }
+        Log-Info "Downloading nssm from fallback URL: $FallbackNssmZipUrl..."
+        try {
+            Invoke-WebRequest -Uri $FallbackNssmZipUrl -OutFile $TempNssmZipPath -UseBasicParsing
+        }
+        catch {
+            Log-Error "Fallback download also failed: $_"
+            Log-Error "Please install nssm manually from https://nssm.cc and ensure nssm.exe is in your PATH."
+            exit 1
+        }
+    }
 
+    try {
         if (Test-Path $TempExtractDir) { Remove-Item -Recurse -Force $TempExtractDir }
         New-Item -ItemType Directory -Path $TempExtractDir -Force | Out-Null
         Expand-Archive -Path $TempNssmZipPath -DestinationPath $TempExtractDir -Force
@@ -137,7 +153,7 @@ if (-not $nssmCmd) {
         }
     }
     catch {
-        Log-Error "Failed to download or configure nssm: $_"
+        Log-Error "Failed to configure nssm: $_"
         Log-Error "Please install nssm manually from https://nssm.cc and ensure nssm.exe is in your PATH."
         exit 1
     }
