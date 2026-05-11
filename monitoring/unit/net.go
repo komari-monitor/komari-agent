@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -236,19 +237,20 @@ func shouldInclude(nicName string, includeNics, excludeNics map[string]struct{})
 	}
 
 	// 如果定义了白名单，则只包括白名单中的接口
-	if len(includeNics) > 0 {
-		_, ok := includeNics[nicName]
-		return ok
+	for pattern := range includeNics {
+		if matched, _ := filepath.Match(pattern, nicName); matched {
+			return true
+		}
 	}
 
 	// 如果定义了黑名单，则排除黑名单中的接口
-	if len(excludeNics) > 0 {
-		if _, ok := excludeNics[nicName]; ok {
+	for pattern := range excludeNics {
+		if matched, _ := filepath.Match(pattern, nicName); matched {
 			return false
 		}
 	}
 
-	return true
+	return len(includeNics) == 0 // 如果没有定义白名单，则默认包含所有非回环接口
 }
 
 func InterfaceList() ([]string, error) {
