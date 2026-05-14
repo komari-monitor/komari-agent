@@ -154,6 +154,9 @@ func tcpPing(target string, timeout time.Duration) (int64, error) {
 		port = "80"
 	}
 
+	// If the host is an IPv6 literal, it might be wrapped in brackets.
+	host = strings.Trim(host, "[]")
+
 	ip, err := resolveIP(host)
 	if err != nil {
 		return -1, err
