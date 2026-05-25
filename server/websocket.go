@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -36,12 +37,7 @@ func EstablishWebSocketConnection() {
 		}
 	}()
 	var err error
-	var interval float64
-	if flags.Interval <= 1 {
-		interval = 1
-	} else {
-		interval = flags.Interval - 1
-	}
+	interval := math.Max(1, flags.Interval-1)
 
 	dataTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
 	defer dataTicker.Stop()
