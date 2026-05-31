@@ -161,6 +161,15 @@ func TestShouldInclude(t *testing.T) {
 			excludeNics: nil,
 			expected:    false,
 		},
+		{
+			name:        "interface with wildcard pattern in exclude list",
+			nicName:     "tun0",
+			includeNics: nil,
+			excludeNics: map[string]struct{}{
+				"tun*": {},
+			},
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
