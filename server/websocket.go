@@ -2,12 +2,15 @@ package server
 
 import (
 	"crypto/tls"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -17,6 +20,12 @@ import (
 	"github.com/komari-monitor/komari-agent/terminal"
 	"github.com/komari-monitor/komari-agent/utils"
 	"github.com/komari-monitor/komari-agent/ws"
+)
+
+var (
+	v2AckMu       sync.Mutex
+	v2AckEventIDs []string
+	v2SeenEvents  = make(map[string]struct{})
 )
 
 func EstablishWebSocketConnection() {
@@ -74,7 +83,16 @@ func EstablishWebSocketConnection() {
 
 				if retry > flags.MaxRetries {
 					log.Println("Max retries reached.")
-					return
+					if flags.ProtocolVersion < 2 {
+						return
+					}
+					conn, err = runPostFallback(websocketEndpoint, interval)
+					if err != nil {
+						log.Println("POST fallback stopped:", err)
+						return
+					}
+					log.Println("WebSocket recovered from POST fallback")
+					go handleWebSocketMessages(conn, make(chan struct{}))
 				}
 			}
 
@@ -100,6 +118,171 @@ func EstablishWebSocketConnection() {
 			}
 		}
 	}
+}
+
+func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, error) {
+	log.Println("Entering v2 POST fallback mode")
+	stop := make(chan struct{})
+	defer close(stop)
+	go runV2PullLoop(stop)
+
+	reportTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
+	defer reportTicker.Stop()
+	reconnectTicker := time.NewTicker(time.Duration(flags.ReconnectInterval) * time.Second)
+	defer reconnectTicker.Stop()
+
+	for {
+		select {
+		case <-reportTicker.C:
+			reportID := fmt.Sprintf("report-%d", time.Now().UnixNano())
+			ackIDs := snapshotV2AckEventIDs()
+			resp, err := postV2Request(v2.BuildReportRequest(reportID, monitoring.GenerateReport(), ackIDs))
+			if err != nil {
+				log.Println("Failed to POST v2 report:", err)
+				continue
+			}
+			clearV2AckEventIDs(ackIDs)
+			processV2ResponseEvents(resp)
+		case <-reconnectTicker.C:
+			conn, err := connectWebSocket(websocketEndpoint)
+			if err == nil {
+				return conn, nil
+			}
+			log.Println("POST fallback WebSocket recovery failed:", err)
+		}
+	}
+}
+
+func runV2PullLoop(stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		pullID := fmt.Sprintf("pull-%d", time.Now().UnixNano())
+		ackIDs := snapshotV2AckEventIDs()
+		payload := v2.NewRequest(pullID, v2.MethodAgentPull, map[string]interface{}{
+			"capabilities":   []string{"exec", "ping", "message", "event", "terminal"},
+			"ack_event_ids": ackIDs,
+		})
+		resp, err := postV2Request(payload)
+		if err != nil {
+			log.Println("Failed to POST v2 pull:", err)
+			time.Sleep(time.Duration(flags.ReconnectInterval) * time.Second)
+			continue
+		}
+		clearV2AckEventIDs(ackIDs)
+		processV2ResponseEvents(resp)
+	}
+}
+
+func postV2Request(payload []byte) (*v2.Response, error) {
+	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
+	body := payload
+	compressed := false
+	if !flags.DisableCompression {
+		if gz, err := gzipBytes(payload); err == nil {
+			body = gz
+			compressed = true
+		}
+	}
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if compressed {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
+	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
+		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
+		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
+	}
+	client := dnsresolver.GetHTTPClient(35 * time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	bytesBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status code: %d,%s", resp.StatusCode, string(bytesBody))
+	}
+	var rpcResp v2.Response
+	if err := json.Unmarshal(bytesBody, &rpcResp); err != nil {
+		return nil, err
+	}
+	if rpcResp.Error != nil {
+		return &rpcResp, fmt.Errorf("rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+	return &rpcResp, nil
+}
+
+func processV2ResponseEvents(resp *v2.Response) {
+	if resp == nil || resp.Result == nil {
+		return
+	}
+	var result v2.EventResult
+	if err := v2.BindResult(resp.Result, &result); err != nil {
+		log.Println("Failed to bind v2 event result:", err)
+		return
+	}
+	for _, event := range result.Events {
+		if processV2Event(nil, event.Method, event.Params, event.ID) {
+			addV2AckEventID(event.ID)
+		}
+	}
+}
+
+func snapshotV2AckEventIDs() []string {
+	v2AckMu.Lock()
+	defer v2AckMu.Unlock()
+	return append([]string{}, v2AckEventIDs...)
+}
+
+func clearV2AckEventIDs(sent []string) {
+	if len(sent) == 0 {
+		return
+	}
+	sentSet := make(map[string]struct{}, len(sent))
+	for _, id := range sent {
+		sentSet[id] = struct{}{}
+	}
+	v2AckMu.Lock()
+	defer v2AckMu.Unlock()
+	remaining := v2AckEventIDs[:0]
+	for _, id := range v2AckEventIDs {
+		if _, ok := sentSet[id]; !ok {
+			remaining = append(remaining, id)
+		}
+	}
+	v2AckEventIDs = remaining
+}
+
+func addV2AckEventID(id string) {
+	if id == "" {
+		return
+	}
+	v2AckMu.Lock()
+	defer v2AckMu.Unlock()
+	v2AckEventIDs = append(v2AckEventIDs, id)
+}
+
+func markV2EventSeen(id string) bool {
+	if id == "" {
+		return true
+	}
+	v2AckMu.Lock()
+	defer v2AckMu.Unlock()
+	if _, ok := v2SeenEvents[id]; ok {
+		return false
+	}
+	v2SeenEvents[id] = struct{}{}
+	return true
 }
 
 func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
@@ -147,34 +330,7 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 			continue
 		}
 		if message.JSONRPC == v2.Version && flags.ProtocolVersion >= 2 {
-			switch message.Method {
-			case v2.MethodAgentExec:
-				var p struct {
-					TaskID  string `json:"task_id"`
-					Command string `json:"command"`
-				}
-				if err := v2.BindParams(message.Params, &p); err == nil {
-					go NewTask(p.TaskID, p.Command)
-				}
-			case v2.MethodAgentPing:
-				var p struct {
-					TaskID uint   `json:"ping_task_id"`
-					Type   string `json:"ping_type"`
-					Target string `json:"ping_target"`
-				}
-				if err := v2.BindParams(message.Params, &p); err == nil {
-					go NewPingTask(conn, p.TaskID, p.Type, p.Target)
-				}
-			case v2.MethodAgentTerminal:
-				var p struct {
-					RequestID string `json:"request_id"`
-				}
-				if err := v2.BindParams(message.Params, &p); err == nil {
-					go establishTerminalConnection(flags.Token, p.RequestID, flags.Endpoint)
-				}
-			case v2.MethodAgentMessage, v2.MethodAgentEvent:
-				log.Printf("received v2 %s: %+v", message.Method, message.Params)
-			}
+			processV2Event(conn, message.Method, message.Params, "")
 			continue
 		}
 
@@ -191,6 +347,53 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 			continue
 		}
 	}
+}
+
+func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventID string) bool {
+	if !markV2EventSeen(eventID) {
+		return true
+	}
+	switch method {
+	case v2.MethodAgentExec:
+		var p struct {
+			TaskID  string `json:"task_id"`
+			Command string `json:"command"`
+		}
+		if err := v2.BindParams(params, &p); err == nil {
+			go NewTask(p.TaskID, p.Command)
+			return true
+		} else {
+			log.Printf("bad v2 exec params: %v", err)
+		}
+	case v2.MethodAgentPing:
+		var p struct {
+			TaskID uint   `json:"ping_task_id"`
+			Type   string `json:"ping_type"`
+			Target string `json:"ping_target"`
+		}
+		if err := v2.BindParams(params, &p); err == nil {
+			go NewPingTask(conn, p.TaskID, p.Type, p.Target)
+			return true
+		} else {
+			log.Printf("bad v2 ping params: %v", err)
+		}
+	case v2.MethodAgentTerminal:
+		var p struct {
+			RequestID string `json:"request_id"`
+		}
+		if err := v2.BindParams(params, &p); err == nil {
+			go establishTerminalConnection(flags.Token, p.RequestID, flags.Endpoint)
+			return true
+		} else {
+			log.Printf("bad v2 terminal params: %v", err)
+		}
+	case v2.MethodAgentMessage, v2.MethodAgentEvent:
+		log.Printf("received v2 %s: %+v", method, params)
+		return true
+	default:
+		log.Printf("unknown v2 event method %s", method)
+	}
+	return false
 }
 
 // connectWebSocket attempts to establish a WebSocket connection and upload basic info

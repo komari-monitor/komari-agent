@@ -2,9 +2,12 @@ package server
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -291,8 +294,67 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	//if pingResult == -1 {
 	//	return
 	//}
+	if conn == nil {
+		if flags.ProtocolVersion >= 2 {
+			if err := postV2RPC(wsPayload); err != nil {
+				log.Printf("Failed to upload ping result over POST: %v", err)
+			}
+		}
+		return
+	}
 	if err := conn.WriteJSON(wsPayload); err != nil {
 		log.Printf("Failed to write JSON to WebSocket: %v", err)
 	}
 
+}
+
+func postV2RPC(payload interface{}) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
+	compressed := false
+	if !flags.DisableCompression {
+		if gz, err := gzipBytes(body); err == nil {
+			body = gz
+			compressed = true
+		}
+	}
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if compressed {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
+	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
+		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
+		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("status code: %d,%s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func gzipBytes(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		_ = zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
