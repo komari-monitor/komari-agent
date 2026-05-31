@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
+	"github.com/komari-monitor/komari-agent/protocol/transport"
+	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
 	"github.com/komari-monitor/komari-agent/update"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
@@ -77,12 +80,27 @@ func tryUploadData(data map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
+	if flags.ProtocolVersion >= 2 {
+		endpoint = strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
+		payload = v2.BuildBasicInfoPayload(data)
+	}
+	body := payload
+	compressed := false
+	if flags.ProtocolVersion >= 2 && !flags.DisableCompression {
+		if gz, err := transport.GzipBytes(payload); err == nil {
+			body = gz
+			compressed = true
+		}
+	}
 
-	req, err := http.NewRequest("POST", endpoint, strings.NewReader(string(payload)))
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if compressed {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
 
 	// 添加Cloudflare Access头部
 	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
@@ -98,11 +116,11 @@ func tryUploadData(data map[string]interface{}) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
-	message := string(body)
+	message := string(respBody)
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("status code: %d,%s", resp.StatusCode, message)

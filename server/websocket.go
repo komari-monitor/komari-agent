@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
+	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
 	"github.com/komari-monitor/komari-agent/terminal"
 	"github.com/komari-monitor/komari-agent/utils"
 	"github.com/komari-monitor/komari-agent/ws"
@@ -20,7 +21,11 @@ import (
 
 func EstablishWebSocketConnection() {
 
-	websocketEndpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/report?token=" + flags.Token
+	path := "/api/clients/report?token=" + flags.Token
+	if flags.ProtocolVersion >= 2 {
+		path = "/api/clients/v2/rpc?token=" + flags.Token
+	}
+	websocketEndpoint := strings.TrimSuffix(flags.Endpoint, "/") + path
 	websocketEndpoint = "ws" + strings.TrimPrefix(websocketEndpoint, "http")
 
 	// 转换中文域名为 ASCII 兼容编码
@@ -74,6 +79,9 @@ func EstablishWebSocketConnection() {
 			}
 
 			data := monitoring.GenerateReport()
+			if flags.ProtocolVersion >= 2 {
+				data = v2.BuildReportPayload(data)
+			}
 			err = conn.WriteMessage(websocket.TextMessage, data)
 			if err != nil {
 				log.Println("Failed to send WebSocket message:", err)
@@ -119,7 +127,10 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 			return
 		}
 		var message struct {
-			Message string `json:"message"`
+			JSONRPC string      `json:"jsonrpc,omitempty"`
+			Method  string      `json:"method,omitempty"`
+			Params  interface{} `json:"params,omitempty"`
+			Message string      `json:"message"`
 			// Terminal
 			TerminalId string `json:"request_id,omitempty"`
 			// Remote Exec
@@ -133,6 +144,37 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 		err = json.Unmarshal(message_raw, &message)
 		if err != nil {
 			log.Println("Bad ws message:", err)
+			continue
+		}
+		if message.JSONRPC == v2.Version && flags.ProtocolVersion >= 2 {
+			switch message.Method {
+			case v2.MethodAgentExec:
+				var p struct {
+					TaskID  string `json:"task_id"`
+					Command string `json:"command"`
+				}
+				if err := v2.BindParams(message.Params, &p); err == nil {
+					go NewTask(p.TaskID, p.Command)
+				}
+			case v2.MethodAgentPing:
+				var p struct {
+					TaskID uint   `json:"ping_task_id"`
+					Type   string `json:"ping_type"`
+					Target string `json:"ping_target"`
+				}
+				if err := v2.BindParams(message.Params, &p); err == nil {
+					go NewPingTask(conn, p.TaskID, p.Type, p.Target)
+				}
+			case v2.MethodAgentTerminal:
+				var p struct {
+					RequestID string `json:"request_id"`
+				}
+				if err := v2.BindParams(message.Params, &p); err == nil {
+					go establishTerminalConnection(flags.Token, p.RequestID, flags.Endpoint)
+				}
+			case v2.MethodAgentMessage, v2.MethodAgentEvent:
+				log.Printf("received v2 %s: %+v", message.Method, message.Params)
+			}
 			continue
 		}
 
@@ -186,9 +228,10 @@ func establishTerminalConnection(token, id, endpoint string) {
 // newWSDialer 构造统一的 WebSocket 拨号器（自定义解析、IPv4/IPv6 动态排序、可选 TLS 忽略）
 func newWSDialer() *websocket.Dialer {
 	d := &websocket.Dialer{
-		HandshakeTimeout: 15 * time.Second,
-		NetDialContext:   dnsresolver.GetDialContext(15 * time.Second),
-		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout:  15 * time.Second,
+		NetDialContext:    dnsresolver.GetDialContext(15 * time.Second),
+		Proxy:             http.ProxyFromEnvironment,
+		EnableCompression: !flags.DisableCompression,
 	}
 	if flags.IgnoreUnsafeCert {
 		d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}

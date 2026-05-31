@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
 	"github.com/komari-monitor/komari-agent/ws"
 	ping "github.com/prometheus-community/pro-bing"
 )
@@ -273,19 +274,24 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	} else {
 		pingResult = int(latency)
 	}
+	finishedAt := time.Now()
 	payload := map[string]interface{}{
 		"type":        "ping_result",
 		"task_id":     taskID,
 		"ping_type":   pingType,
 		"value":       pingResult,
-		"finished_at": time.Now(),
+		"finished_at": finishedAt,
+	}
+	var wsPayload interface{} = payload
+	if flags.ProtocolVersion >= 2 {
+		wsPayload = v2.BuildPingResultPayload(taskID, pingType, pingResult, finishedAt)
 	}
 	// https://github.com/komari-monitor/komari/commit/eb87a4fc330b7d1c407fa4ff70177615a4f50a1f
 	// -1 代表丢包，服务端计算
 	//if pingResult == -1 {
 	//	return
 	//}
-	if err := conn.WriteJSON(payload); err != nil {
+	if err := conn.WriteJSON(wsPayload); err != nil {
 		log.Printf("Failed to write JSON to WebSocket: %v", err)
 	}
 
