@@ -67,8 +67,13 @@ func newTerminalImpl() (*terminalImpl, error) {
 		return nil, fmt.Errorf("no supported shell found among %v", defaultShells)
 	}
 
+	var prefixCmd string
+	if shell == "zsh" {
+		prefixCmd = "unsetopt NOMATCH 2>/dev/null; "
+	}
+
 	shellArgv0 := filepath.Base(shell)
-	shellCmd := "for f in /etc/update-motd.d/*; do [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$0\""
+	shellCmd := prefixCmd + "for f in /etc/update-motd.d/*; do [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$0\""
 
 	cmd := exec.Command(shell, "-c", shellCmd)
 	cmd.Args[0] = shellArgv0
