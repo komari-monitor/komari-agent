@@ -14,18 +14,20 @@ import (
 var flags = pkg_flags.GlobalConfig
 
 type CpuInfo struct {
-	CPUName         string  `json:"cpu_name"`
-	CPUArchitecture string  `json:"cpu_architecture"`
-	CPUCores        int     `json:"cpu_cores"`
-	CPUUsage        float64 `json:"cpu_usage"`
+	CPUName          string  `json:"cpu_name"`
+	CPUArchitecture  string  `json:"cpu_architecture"`
+	CPUCores         int     `json:"cpu_cores"`
+	CPUPhysicalCores int     `json:"cpu_physical_cores"`
+	CPUUsage         float64 `json:"cpu_usage"`
 }
 
 func Cpu() CpuInfo {
 	cpuinfo := CpuInfo{
-		CPUName:         "Unknown",
-		CPUArchitecture: runtime.GOARCH,
-		CPUCores:        1,
-		CPUUsage:        0.0,
+		CPUName:          "Unknown",
+		CPUArchitecture:  runtime.GOARCH,
+		CPUCores:         1,
+		CPUPhysicalCores: 0, // 为兼容旧版 agent，0 表示未上报或未知，避免与实际核心数混淆
+		CPUUsage:         0.0,
 	}
 
 	// 优先使用 gopsutil 获取 CPU 信息，避免触发 lscpu 在部分内核上的 lockdown 日志刷屏。
@@ -47,8 +49,13 @@ func Cpu() CpuInfo {
 	}
 
 	cores, err := cpu.Counts(true)
-	if err == nil {
+	if err == nil && cores > 0 {
 		cpuinfo.CPUCores = cores
+	}
+
+	physicalCores, err := cpu.Counts(false)
+	if err == nil && physicalCores > 0 {
+		cpuinfo.CPUPhysicalCores = physicalCores
 	}
 
 	percentages, err := cpu.Percent(1*time.Second, false)

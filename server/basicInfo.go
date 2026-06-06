@@ -46,19 +46,20 @@ func uploadBasicInfo() error {
 	ipv4, ipv6, _ := monitoring.GetIPAddress()
 
 	data := map[string]interface{}{
-		"cpu_name":       cpu.CPUName,
-		"cpu_cores":      cpu.CPUCores,
-		"arch":           cpu.CPUArchitecture,
-		"os":             osname,
-		"kernel_version": kernelVersion,
-		"ipv4":           ipv4,
-		"ipv6":           ipv6,
-		"mem_total":      monitoring.Ram().Total,
-		"swap_total":     monitoring.Swap().Total,
-		"disk_total":     monitoring.Disk().Total,
-		"gpu_name":       monitoring.GpuName(),
-		"virtualization": monitoring.Virtualized(),
-		"version":        update.CurrentVersion,
+		"cpu_name":           cpu.CPUName,
+		"cpu_cores":          cpu.CPUCores,
+		"cpu_physical_cores": cpu.CPUPhysicalCores,
+		"arch":               cpu.CPUArchitecture,
+		"os":                 osname,
+		"kernel_version":     kernelVersion,
+		"ipv4":               ipv4,
+		"ipv6":               ipv6,
+		"mem_total":          monitoring.Ram().Total,
+		"swap_total":         monitoring.Swap().Total,
+		"disk_total":         monitoring.Disk().Total,
+		"gpu_name":           monitoring.GpuName(),
+		"virtualization":     monitoring.Virtualized(),
+		"version":            update.CurrentVersion,
 	}
 
 	// 尝试上传完整数据
@@ -66,6 +67,8 @@ func uploadBasicInfo() error {
 	if err != nil {
 		// 兼容 <= 1.0.2
 		delete(data, "kernel_version")
+		// 兼容 <= 1.2.0
+		delete(data, "cpu_physical_cores")
 		err = tryUploadData(data)
 		if err != nil {
 			return err
