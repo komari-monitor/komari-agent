@@ -1,6 +1,7 @@
 package server
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -77,6 +78,52 @@ func TestBuildTaskCommandUsesShellStdinUnix(t *testing.T) {
 	}
 	if cmd.Stdin == nil {
 		t.Fatal("expected command script to be provided on stdin")
+	}
+}
+
+func TestBuildTaskCommandWritesUtf8BomWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell script execution test")
+	}
+
+	cmd, cleanup, err := buildTaskCommand("Write-Output '你好'")
+	if err != nil {
+		t.Fatalf("buildTaskCommand returned error: %v", err)
+	}
+	defer cleanup()
+
+	if filepath.Base(cmd.Path) != "powershell.exe" && filepath.Base(cmd.Path) != "powershell" {
+		t.Fatalf("expected powershell command, got %q", cmd.Path)
+	}
+	if len(cmd.Args) == 0 {
+		t.Fatal("expected PowerShell script path in command args")
+	}
+
+	scriptFile := cmd.Args[len(cmd.Args)-1]
+	file, err := filepath.Abs(scriptFile)
+	if err != nil {
+		t.Fatalf("failed to resolve script path: %v", err)
+	}
+
+	f, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		t.Fatalf("failed to evaluate script path: %v", err)
+	}
+	contents, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatalf("failed to read script file: %v", err)
+	}
+	if len(contents) < 3 || contents[0] != 0xEF || contents[1] != 0xBB || contents[2] != 0xBF {
+		t.Fatalf("expected UTF-8 BOM at start of script, got %#v", contents[:min(len(contents), 3)])
+	}
+}
+
+func TestAppendErrorResultAvoidsLeadingNewline(t *testing.T) {
+	if got := appendErrorResult("", "stderr"); got != "stderr" {
+		t.Fatalf("expected stderr without leading newline, got %q", got)
+	}
+	if got := appendErrorResult("stdout", "stderr"); got != "stdout\nstderr" {
+		t.Fatalf("expected stdout and stderr separated by newline, got %q", got)
 	}
 }
 

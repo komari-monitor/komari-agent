@@ -54,7 +54,7 @@ func runTaskCommand(command string) (string, int) {
 
 	result := stdout.String()
 	if stderr.Len() > 0 {
-		result += "\n" + stderr.String()
+		result = appendErrorResult(result, stderr.String())
 	}
 	result = strings.ReplaceAll(result, "\r\n", "\n")
 	exitCode := 0
@@ -79,6 +79,11 @@ func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
 		}
 		cleanup := func() {
 			_ = os.Remove(scriptFile.Name())
+		}
+		if _, err := scriptFile.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			_ = scriptFile.Close()
+			cleanup()
+			return nil, func() {}, err
 		}
 		script := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + command
 		if _, err := scriptFile.WriteString(script); err != nil {
