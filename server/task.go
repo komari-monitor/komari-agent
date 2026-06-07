@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -25,7 +26,7 @@ func NewTask(task_id, command string) {
 	if task_id == "" {
 		return
 	}
-	if command == "" {
+	if strings.TrimSpace(command) == "" {
 		uploadTaskResult(task_id, "No command provided", 0, time.Now())
 		return
 	}
@@ -34,18 +35,22 @@ func NewTask(task_id, command string) {
 		return
 	}
 	log.Printf("Executing task %s with command: %s", task_id, command)
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "+command)
-	} else {
-		cmd = exec.Command("sh", "-c", command)
+	result, exitCode := runTaskCommand(command)
+	uploadTaskResult(task_id, result, exitCode, time.Now())
+}
+
+func runTaskCommand(command string) (string, int) {
+	cmd, cleanup, err := buildTaskCommand(command)
+	if err != nil {
+		return err.Error(), -1
 	}
+	defer cleanup()
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	finishedAt := time.Now()
+	err = cmd.Run()
 
 	result := stdout.String()
 	if stderr.Len() > 0 {
@@ -56,10 +61,49 @@ func NewTask(task_id, command string) {
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
+		} else {
+			result = appendErrorResult(result, err.Error())
+			exitCode = -1
 		}
 	}
 
-	uploadTaskResult(task_id, result, exitCode, finishedAt)
+	return result, exitCode
+}
+
+func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		scriptFile, err := os.CreateTemp("", "komari-task-*.ps1")
+		if err != nil {
+			return nil, func() {}, err
+		}
+		cleanup := func() {
+			_ = os.Remove(scriptFile.Name())
+		}
+		script := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + command
+		if _, err := scriptFile.WriteString(script); err != nil {
+			_ = scriptFile.Close()
+			cleanup()
+			return nil, func() {}, err
+		}
+		if err := scriptFile.Close(); err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+		cmd = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.Name())
+		return cmd, cleanup, nil
+	} else {
+		cmd = exec.Command("sh", "-s")
+		cmd.Stdin = strings.NewReader(command)
+	}
+	return cmd, func() {}, nil
+}
+
+func appendErrorResult(result, err string) string {
+	if result == "" {
+		return err
+	}
+	return result + "\n" + err
 }
 
 func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time) {
