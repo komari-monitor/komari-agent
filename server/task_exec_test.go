@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -54,6 +55,7 @@ func TestRunTaskCommandEscapingAndWildcardsUnix(t *testing.T) {
 		t.Fatalf("quoted wildcard should remain literal, got %q", lines[1])
 	}
 	expanded := strings.Fields(lines[2])
+	sort.Strings(expanded)
 	if len(expanded) != 2 || expanded[0] != "alpha.txt" || expanded[1] != "gamma.txt" {
 		t.Fatalf("wildcard expansion mismatch: %q", lines[2])
 	}
