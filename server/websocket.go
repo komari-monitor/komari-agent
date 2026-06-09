@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -171,9 +172,9 @@ func buildWebSocketEndpoint(protocolVersion int) string {
 
 func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, error) {
 	log.Println("Entering v2 POST fallback mode")
-	stop := make(chan struct{})
-	defer close(stop)
-	go runV2PullLoop(stop)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runV2PullLoop(ctx)
 
 	reportTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
 	defer reportTicker.Stop()
@@ -208,10 +209,10 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 	}
 }
 
-func runV2PullLoop(stop <-chan struct{}) {
+func runV2PullLoop(ctx context.Context) {
 	for {
 		select {
-		case <-stop:
+		case <-ctx.Done():
 			return
 		default:
 		}
@@ -221,8 +222,11 @@ func runV2PullLoop(stop <-chan struct{}) {
 			"capabilities":  []string{"exec", "ping", "message", "event", "terminal"},
 			"ack_event_ids": ackIDs,
 		})
-		resp, err := postV2Request(payload)
+		resp, err := postV2RequestContext(ctx, payload)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			if isHTTPStatus(err, http.StatusNotFound) {
 				return
 			}
@@ -236,6 +240,10 @@ func runV2PullLoop(stop <-chan struct{}) {
 }
 
 func postV2Request(payload []byte) (*v2.Response, error) {
+	return postV2RequestContext(context.Background(), payload)
+}
+
+func postV2RequestContext(ctx context.Context, payload []byte) (*v2.Response, error) {
 	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
 	body := payload
 	compressed := false
@@ -245,7 +253,7 @@ func postV2Request(payload []byte) (*v2.Response, error) {
 			compressed = true
 		}
 	}
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/dnsresolver"
 	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
 	"github.com/komari-monitor/komari-agent/ws"
 	ping "github.com/prometheus-community/pro-bing"
@@ -121,33 +122,38 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 	jsonData, _ := json.Marshal(payload)
 	endpoint := flags.Endpoint + "/api/clients/task/result?token=" + flags.Token
 
-	// 创建HTTP请求以支持自定义头部
-	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonData))
-	if err != nil {
-		log.Printf("Failed to create task result request: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// 添加Cloudflare Access头部（如果配置了）
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	client := dnsresolver.GetHTTPClient(30 * time.Second)
 	maxRetry := flags.MaxRetries
-	for i := 0; i < maxRetry && (err != nil || resp.StatusCode != http.StatusOK); i++ {
-		log.Printf("Failed to upload task result, retrying %d/%d", i+1, maxRetry)
-		time.Sleep(2 * time.Second) // Wait before retrying
-		resp, err = client.Do(req)
-	}
-	if resp != nil {
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("Failed to upload task result: %s", resp.Status)
+	for attempt := 0; attempt <= maxRetry; attempt++ {
+		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(jsonData))
+		if err != nil {
+			log.Printf("Failed to create task result request: %v", err)
+			return
 		}
+		req.Header.Set("Content-Type", "application/json")
+		if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
+			req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
+			req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
+		}
+
+		resp, err := client.Do(req)
+		if resp != nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
+			return
+		}
+		if attempt == maxRetry {
+			if err != nil {
+				log.Printf("Failed to upload task result: %v", err)
+			} else if resp != nil {
+				log.Printf("Failed to upload task result: %s", resp.Status)
+			}
+			return
+		}
+		log.Printf("Failed to upload task result, retrying %d/%d", attempt+1, maxRetry)
+		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -381,7 +387,7 @@ func postV2RPC(payload interface{}) error {
 		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
 		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := dnsresolver.GetHTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -391,6 +397,7 @@ func postV2RPC(payload interface{}) error {
 		body, _ := io.ReadAll(resp.Body)
 		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(body)}
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 

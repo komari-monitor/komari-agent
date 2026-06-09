@@ -36,7 +36,14 @@ var (
 
 	preferV4Once sync.Once
 	hasIPv4      bool
+	httpClientMu sync.Mutex
+	httpClients  = make(map[httpClientKey]*http.Client)
 )
+
+type httpClientKey struct {
+	timeout          time.Duration
+	ignoreUnsafeCert bool
+}
 
 // SetCustomDNSServer 设置自定义DNS服务器
 func SetCustomDNSServer(dnsServer string) {
@@ -158,7 +165,9 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 			}
 			return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
 		},
-		MaxIdleConns:          10,
+		MaxIdleConns:          32,
+		MaxIdleConnsPerHost:   4,
+		MaxConnsPerHost:       8,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -168,12 +177,23 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 }
 
 func GetHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	key := httpClientKey{timeout: timeout, ignoreUnsafeCert: flags.IgnoreUnsafeCert}
+	httpClientMu.Lock()
+	defer httpClientMu.Unlock()
+	if client := httpClients[key]; client != nil {
+		return client
+	}
+	client := &http.Client{
 		Transport: buildTransport(timeout, &tls.Config{
 			InsecureSkipVerify: flags.IgnoreUnsafeCert,
 		}),
 		Timeout: timeout,
 	}
+	httpClients[key] = client
+	return client
 }
 
 // GetNetDialer 返回一个使用自定义DNS解析器的网络拨号器
