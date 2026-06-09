@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -78,18 +77,31 @@ func uploadBasicInfo() error {
 }
 
 func tryUploadData(data map[string]interface{}) error {
+	protocolVersion := uploadProtocolVersion()
+	if protocolVersion >= 2 {
+		err := tryUploadDataWithProtocol(data, 2)
+		if isHTTPStatus(err, http.StatusNotFound) {
+			log.Println("v2 basic info endpoint returned 404, falling back to v1")
+			return tryUploadDataWithProtocol(data, 1)
+		}
+		return err
+	}
+	return tryUploadDataWithProtocol(data, 1)
+}
+
+func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int) error {
 	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/uploadBasicInfo?token=" + flags.Token
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	if flags.ProtocolVersion >= 2 {
+	if protocolVersion >= 2 {
 		endpoint = strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
 		payload = v2.BuildBasicInfoPayload(data)
 	}
 	body := payload
 	compressed := false
-	if flags.ProtocolVersion >= 2 && !flags.DisableCompression {
+	if protocolVersion >= 2 && !flags.DisableCompression {
 		if gz, err := transport.GzipBytes(payload); err == nil {
 			body = gz
 			compressed = true
@@ -126,7 +138,7 @@ func tryUploadData(data map[string]interface{}) error {
 	message := string(respBody)
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status code: %d,%s", resp.StatusCode, message)
+		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: message}
 	}
 
 	return nil

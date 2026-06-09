@@ -1,8 +1,8 @@
 package server
 
 import (
-	"crypto/tls"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,26 +29,12 @@ var (
 )
 
 func EstablishWebSocketConnection() {
-
-	path := "/api/clients/report?token=" + flags.Token
-	if flags.ProtocolVersion >= 2 {
-		path = "/api/clients/v2/rpc?token=" + flags.Token
-	}
-	websocketEndpoint := strings.TrimSuffix(flags.Endpoint, "/") + path
-	websocketEndpoint = "ws" + strings.TrimPrefix(websocketEndpoint, "http")
-
-	// 转换中文域名为 ASCII 兼容编码
-	if convertedEndpoint, err := utils.ConvertIDNToASCII(websocketEndpoint); err == nil {
-		websocketEndpoint = convertedEndpoint
-	} else {
-		log.Printf("Warning: Failed to convert WebSocket IDN to ASCII: %v", err)
-	}
-
 	var conn *ws.SafeConn
 	defer func() {
 		if conn != nil {
 			conn.Close()
 		}
+		resetConnectionProtocolVersion()
 	}()
 	var err error
 	interval := math.Max(1, flags.Interval-1)
@@ -59,21 +45,37 @@ func EstablishWebSocketConnection() {
 	heartbeatTicker := time.NewTicker(30 * time.Second)
 	defer heartbeatTicker.Stop()
 
+	nextProtocol := requestedProtocolVersion()
+	activeProtocol := 0
+	var readDone <-chan struct{}
+
 	for {
 		select {
 		case <-dataTicker.C:
 			if conn == nil {
 				log.Println("Attempting to connect to WebSocket...")
 				retry := 0
+				connectProtocol := nextProtocol
 				for retry <= flags.MaxRetries {
 					if retry > 0 {
 						log.Println("Retrying websocket connection, attempt:", retry)
 					}
+					websocketEndpoint := buildWebSocketEndpoint(connectProtocol)
 					conn, err = connectWebSocket(websocketEndpoint)
 					if err == nil {
-						log.Println("WebSocket connected")
-						go handleWebSocketMessages(conn, make(chan struct{}))
+						activeProtocol = connectProtocol
+						nextProtocol = connectProtocol
+						setConnectionProtocolVersion(activeProtocol)
+						log.Printf("WebSocket connected using v%d protocol", activeProtocol)
+						done := make(chan struct{})
+						readDone = done
+						go handleWebSocketMessages(conn, activeProtocol, done)
 						break
+					} else if connectProtocol >= 2 && isHTTPStatus(err, http.StatusNotFound) {
+						log.Println("v2 WebSocket endpoint returned 404, falling back to v1 until this connection is lost")
+						connectProtocol = 1
+						retry = 0
+						continue
 					} else {
 						log.Println("Failed to connect to WebSocket:", err)
 					}
@@ -83,21 +85,31 @@ func EstablishWebSocketConnection() {
 
 				if retry > flags.MaxRetries {
 					log.Println("Max retries reached.")
-					if flags.ProtocolVersion < 2 {
+					if connectProtocol < 2 {
 						return
 					}
-					conn, err = runPostFallback(websocketEndpoint, interval)
+					conn, err = runPostFallback(buildWebSocketEndpoint(connectProtocol), interval)
 					if err != nil {
+						if isHTTPStatus(err, http.StatusNotFound) {
+							log.Println("v2 POST endpoint returned 404, falling back to v1 until this connection is lost")
+							nextProtocol = 1
+							continue
+						}
 						log.Println("POST fallback stopped:", err)
 						return
 					}
 					log.Println("WebSocket recovered from POST fallback")
-					go handleWebSocketMessages(conn, make(chan struct{}))
+					activeProtocol = connectProtocol
+					nextProtocol = connectProtocol
+					setConnectionProtocolVersion(activeProtocol)
+					done := make(chan struct{})
+					readDone = done
+					go handleWebSocketMessages(conn, activeProtocol, done)
 				}
 			}
 
 			data := monitoring.GenerateReport()
-			if flags.ProtocolVersion >= 2 {
+			if activeProtocol >= 2 {
 				data = v2.BuildReportPayload(data)
 			}
 			err = conn.WriteMessage(websocket.TextMessage, data)
@@ -105,6 +117,11 @@ func EstablishWebSocketConnection() {
 				log.Println("Failed to send WebSocket message:", err)
 				conn.Close()
 				conn = nil // Mark connection as dead
+				readDone = nil
+				resetConnectionProtocolVersion()
+				if requestedProtocolVersion() >= 2 {
+					nextProtocol = 2
+				}
 				continue
 			}
 		case <-heartbeatTicker.C:
@@ -114,10 +131,42 @@ func EstablishWebSocketConnection() {
 					log.Println("Failed to send heartbeat:", err)
 					conn.Close()
 					conn = nil // Mark connection as dead
+					readDone = nil
+					resetConnectionProtocolVersion()
+					if requestedProtocolVersion() >= 2 {
+						nextProtocol = 2
+					}
 				}
+			}
+		case <-readDone:
+			log.Println("WebSocket disconnected")
+			if conn != nil {
+				conn.Close()
+				conn = nil
+			}
+			readDone = nil
+			activeProtocol = 0
+			resetConnectionProtocolVersion()
+			if requestedProtocolVersion() >= 2 {
+				nextProtocol = 2
 			}
 		}
 	}
+}
+
+func buildWebSocketEndpoint(protocolVersion int) string {
+	path := "/api/clients/report?token=" + flags.Token
+	if protocolVersion >= 2 {
+		path = "/api/clients/v2/rpc?token=" + flags.Token
+	}
+	websocketEndpoint := strings.TrimSuffix(flags.Endpoint, "/") + path
+	websocketEndpoint = "ws" + strings.TrimPrefix(websocketEndpoint, "http")
+	if convertedEndpoint, err := utils.ConvertIDNToASCII(websocketEndpoint); err == nil {
+		return convertedEndpoint
+	} else {
+		log.Printf("Warning: Failed to convert WebSocket IDN to ASCII: %v", err)
+	}
+	return websocketEndpoint
 }
 
 func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, error) {
@@ -138,6 +187,9 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 			ackIDs := snapshotV2AckEventIDs()
 			resp, err := postV2Request(v2.BuildReportRequest(reportID, monitoring.GenerateReport(), ackIDs))
 			if err != nil {
+				if isHTTPStatus(err, http.StatusNotFound) {
+					return nil, err
+				}
 				log.Println("Failed to POST v2 report:", err)
 				continue
 			}
@@ -147,6 +199,9 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 			conn, err := connectWebSocket(websocketEndpoint)
 			if err == nil {
 				return conn, nil
+			}
+			if isHTTPStatus(err, http.StatusNotFound) {
+				return nil, err
 			}
 			log.Println("POST fallback WebSocket recovery failed:", err)
 		}
@@ -163,11 +218,14 @@ func runV2PullLoop(stop <-chan struct{}) {
 		pullID := fmt.Sprintf("pull-%d", time.Now().UnixNano())
 		ackIDs := snapshotV2AckEventIDs()
 		payload := v2.NewRequest(pullID, v2.MethodAgentPull, map[string]interface{}{
-			"capabilities":   []string{"exec", "ping", "message", "event", "terminal"},
+			"capabilities":  []string{"exec", "ping", "message", "event", "terminal"},
 			"ack_event_ids": ackIDs,
 		})
 		resp, err := postV2Request(payload)
 		if err != nil {
+			if isHTTPStatus(err, http.StatusNotFound) {
+				return
+			}
 			log.Println("Failed to POST v2 pull:", err)
 			time.Sleep(time.Duration(flags.ReconnectInterval) * time.Second)
 			continue
@@ -210,7 +268,7 @@ func postV2Request(payload []byte) (*v2.Response, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status code: %d,%s", resp.StatusCode, string(bytesBody))
+		return nil, &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(bytesBody)}
 	}
 	var rpcResp v2.Response
 	if err := json.Unmarshal(bytesBody, &rpcResp); err != nil {
@@ -293,7 +351,7 @@ func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 	conn, resp, err := dialer.Dial(websocketEndpoint, headers)
 	if err != nil {
 		if resp != nil && resp.StatusCode != 101 {
-			return nil, fmt.Errorf("%s", resp.Status)
+			return nil, &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 		}
 		return nil, err
 	}
@@ -301,7 +359,7 @@ func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 	return ws.NewSafeConn(conn), nil
 }
 
-func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
+func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<- struct{}) {
 	defer close(done)
 	for {
 		_, message_raw, err := conn.ReadMessage()
@@ -329,7 +387,7 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 			log.Println("Bad ws message:", err)
 			continue
 		}
-		if message.JSONRPC == v2.Version && flags.ProtocolVersion >= 2 {
+		if message.JSONRPC == v2.Version && protocolVersion >= 2 {
 			processV2Event(conn, message.Method, message.Params, "")
 			continue
 		}
@@ -343,7 +401,7 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 			continue
 		}
 		if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
-			go NewPingTask(conn, message.PingTaskID, message.PingType, message.PingTarget)
+			go NewPingTask(conn, protocolVersion, message.PingTaskID, message.PingType, message.PingTarget)
 			continue
 		}
 	}
@@ -372,7 +430,7 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			Target string `json:"ping_target"`
 		}
 		if err := v2.BindParams(params, &p); err == nil {
-			go NewPingTask(conn, p.TaskID, p.Type, p.Target)
+			go NewPingTask(conn, 2, p.TaskID, p.Type, p.Target)
 			return true
 		} else {
 			log.Printf("bad v2 ping params: %v", err)

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -268,7 +267,7 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	return latency, errors.New("http status not ok")
 }
 
-func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
+func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, pingTarget string) {
 	if taskID == 0 {
 		log.Printf("Invalid task ID: %d", taskID)
 		return
@@ -335,7 +334,7 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 		"finished_at": finishedAt,
 	}
 	var wsPayload interface{} = payload
-	if flags.ProtocolVersion >= 2 {
+	if protocolVersion >= 2 {
 		wsPayload = v2.BuildPingResultPayload(taskID, pingType, pingResult, finishedAt)
 	}
 	// https://github.com/komari-monitor/komari/commit/eb87a4fc330b7d1c407fa4ff70177615a4f50a1f
@@ -344,7 +343,7 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	//	return
 	//}
 	if conn == nil {
-		if flags.ProtocolVersion >= 2 {
+		if protocolVersion >= 2 {
 			if err := postV2RPC(wsPayload); err != nil {
 				log.Printf("Failed to upload ping result over POST: %v", err)
 			}
@@ -390,7 +389,7 @@ func postV2RPC(payload interface{}) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("status code: %d,%s", resp.StatusCode, string(body))
+		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(body)}
 	}
 	return nil
 }
