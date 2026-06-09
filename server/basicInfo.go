@@ -80,8 +80,9 @@ func tryUploadData(data map[string]interface{}) error {
 	protocolVersion := uploadProtocolVersion()
 	if protocolVersion >= 2 {
 		err := tryUploadDataWithProtocol(data, 2)
-		if isHTTPStatus(err, http.StatusNotFound) {
-			log.Println("v2 basic info endpoint returned 404, falling back to v1")
+		if shouldFallbackToV1(2, err) {
+			log.Printf("v2 basic info failed %d consecutive protocol attempts, falling back to v1", v2ProtocolFallbackThreshold)
+			setConnectionProtocolVersion(1)
 			return tryUploadDataWithProtocol(data, 1)
 		}
 		return err
@@ -139,6 +140,14 @@ func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int)
 
 	if resp.StatusCode != http.StatusOK {
 		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: message}
+	}
+	if protocolVersion >= 2 {
+		if len(bytes.TrimSpace(respBody)) > 0 {
+			if _, err := parseV2Response(respBody); err != nil {
+				return err
+			}
+		}
+		resetV2ProtocolFailures(protocolVersion)
 	}
 
 	return nil

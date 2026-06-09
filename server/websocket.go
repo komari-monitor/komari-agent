@@ -72,8 +72,8 @@ func EstablishWebSocketConnection() {
 						readDone = done
 						go handleWebSocketMessages(conn, activeProtocol, done)
 						break
-					} else if connectProtocol >= 2 && isHTTPStatus(err, http.StatusNotFound) {
-						log.Println("v2 WebSocket endpoint returned 404, falling back to v1 until this connection is lost")
+					} else if shouldFallbackToV1(connectProtocol, err) {
+						log.Printf("v2 WebSocket endpoint failed (%v), falling back to v1 until this connection is lost", err)
 						connectProtocol = 1
 						retry = 0
 						continue
@@ -91,9 +91,10 @@ func EstablishWebSocketConnection() {
 					}
 					conn, err = runPostFallback(buildWebSocketEndpoint(connectProtocol), interval)
 					if err != nil {
-						if isHTTPStatus(err, http.StatusNotFound) {
-							log.Println("v2 POST endpoint returned 404, falling back to v1 until this connection is lost")
+						if connectProtocol >= 2 && isV2ProtocolFailure(err) {
+							log.Printf("v2 POST fallback failed (%v), falling back to v1 until this connection is lost", err)
 							nextProtocol = 1
+							setConnectionProtocolVersion(1)
 							continue
 						}
 						log.Println("POST fallback stopped:", err)
@@ -174,7 +175,8 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 	log.Println("Entering v2 POST fallback mode")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runV2PullLoop(ctx)
+	pullErr := make(chan error, 1)
+	go runV2PullLoop(ctx, pullErr)
 
 	reportTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
 	defer reportTicker.Stop()
@@ -188,7 +190,7 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 			ackIDs := snapshotV2AckEventIDs()
 			resp, err := postV2Request(v2.BuildReportRequest(reportID, monitoring.GenerateReport(), ackIDs))
 			if err != nil {
-				if isHTTPStatus(err, http.StatusNotFound) {
+				if shouldFallbackToV1(2, err) {
 					return nil, err
 				}
 				log.Println("Failed to POST v2 report:", err)
@@ -201,15 +203,17 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 			if err == nil {
 				return conn, nil
 			}
-			if isHTTPStatus(err, http.StatusNotFound) {
+			if shouldFallbackToV1(2, err) {
 				return nil, err
 			}
 			log.Println("POST fallback WebSocket recovery failed:", err)
+		case err := <-pullErr:
+			return nil, err
 		}
 	}
 }
 
-func runV2PullLoop(ctx context.Context) {
+func runV2PullLoop(ctx context.Context, errCh chan<- error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -227,7 +231,11 @@ func runV2PullLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if isHTTPStatus(err, http.StatusNotFound) {
+			if shouldFallbackToV1(2, err) {
+				select {
+				case errCh <- err:
+				default:
+				}
 				return
 			}
 			log.Println("Failed to POST v2 pull:", err)
@@ -278,14 +286,12 @@ func postV2RequestContext(ctx context.Context, payload []byte) (*v2.Response, er
 	if resp.StatusCode != http.StatusOK {
 		return nil, &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(bytesBody)}
 	}
-	var rpcResp v2.Response
-	if err := json.Unmarshal(bytesBody, &rpcResp); err != nil {
+	rpcResp, err := parseV2Response(bytesBody)
+	if err != nil {
 		return nil, err
 	}
-	if rpcResp.Error != nil {
-		return &rpcResp, fmt.Errorf("rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-	return &rpcResp, nil
+	resetV2ProtocolFailures(2)
+	return rpcResp, nil
 }
 
 func processV2ResponseEvents(resp *v2.Response) {
