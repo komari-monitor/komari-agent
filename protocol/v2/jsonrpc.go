@@ -65,22 +65,20 @@ func NewRequest(id interface{}, method string, params interface{}) []byte {
 }
 
 func BuildReportPayload(report v1.ReportPayload) []byte {
-	var raw interface{}
-	_ = json.Unmarshal(report, &raw)
-	return NewNotification(MethodAgentReport, map[string]interface{}{"report": raw})
+	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report)})
 }
 
 func BuildReportRequest(id interface{}, report v1.ReportPayload, ackEventIDs []string) []byte {
-	var raw interface{}
-	_ = json.Unmarshal(report, &raw)
-	return NewRequest(id, MethodAgentReport, map[string]interface{}{
-		"report":        raw,
-		"ack_event_ids": ackEventIDs,
-	})
+	return NewRequest(id, MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
 }
 
 func BuildBasicInfoPayload(info map[string]interface{}) []byte {
 	return NewNotification(MethodAgentBasicInfo, map[string]interface{}{"info": info})
+}
+
+type reportParams struct {
+	Report      json.RawMessage `json:"report"`
+	AckEventIDs []string        `json:"ack_event_ids,omitempty"`
 }
 
 func BuildPingResultPayload(taskID uint, pingType string, value int, finishedAt time.Time) interface{} {

@@ -6,118 +6,146 @@ import (
 	"log"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
-	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
+	unit "github.com/komari-monitor/komari-agent/monitoring/unit"
 )
 
 var flags = pkg_flags.GlobalConfig
 
+type report struct {
+	CPU         cpuReport         `json:"cpu"`
+	Ram         usageReport       `json:"ram"`
+	Swap        usageReport       `json:"swap"`
+	Load        loadReport        `json:"load"`
+	Disk        usageReport       `json:"disk"`
+	Network     networkReport     `json:"network"`
+	Connections connectionsReport `json:"connections"`
+	GPU         interface{}       `json:"gpu,omitempty"`
+	Uptime      uint64            `json:"uptime"`
+	Process     int               `json:"process"`
+	Message     string            `json:"message"`
+}
+
+type cpuReport struct {
+	Usage float64 `json:"usage"`
+}
+
+type usageReport struct {
+	Total uint64 `json:"total"`
+	Used  uint64 `json:"used"`
+}
+
+type loadReport struct {
+	Load1  float64 `json:"load1"`
+	Load5  float64 `json:"load5"`
+	Load15 float64 `json:"load15"`
+}
+
+type networkReport struct {
+	Up        uint64 `json:"up"`
+	Down      uint64 `json:"down"`
+	TotalUp   uint64 `json:"totalUp"`
+	TotalDown uint64 `json:"totalDown"`
+}
+
+type connectionsReport struct {
+	TCP int `json:"tcp"`
+	UDP int `json:"udp"`
+}
+
+type gpuModelsReport struct {
+	Models []string `json:"models"`
+}
+
+type gpuReport struct {
+	Count        int               `json:"count"`
+	AverageUsage float64           `json:"average_usage"`
+	DetailedInfo []gpuDeviceReport `json:"detailed_info"`
+}
+
+type gpuDeviceReport struct {
+	Name        string  `json:"name"`
+	MemoryTotal uint64  `json:"memory_total"`
+	MemoryUsed  uint64  `json:"memory_used"`
+	Utilization float64 `json:"utilization"`
+	Temperature uint64  `json:"temperature"`
+}
+
 func GenerateReport() []byte {
 	message := ""
-	data := map[string]interface{}{}
+	data := report{}
 
-	cpu := monitoring.Cpu()
+	cpu := unit.Cpu()
 	cpuUsage := cpu.CPUUsage
 	if cpuUsage <= 0.001 {
 		cpuUsage = 0.001
 	}
-	data["cpu"] = map[string]interface{}{
-		"usage": cpuUsage,
-	}
+	data.CPU = cpuReport{Usage: cpuUsage}
 
-	ram := monitoring.Ram()
-	data["ram"] = map[string]interface{}{
-		"total": ram.Total,
-		"used":  ram.Used,
-	}
+	ram := unit.Ram()
+	data.Ram = usageReport{Total: ram.Total, Used: ram.Used}
 
-	swap := monitoring.Swap()
-	data["swap"] = map[string]interface{}{
-		"total": swap.Total,
-		"used":  swap.Used,
-	}
-	load := monitoring.Load()
-	data["load"] = map[string]interface{}{
-		"load1":  load.Load1,
-		"load5":  load.Load5,
-		"load15": load.Load15,
-	}
+	swap := unit.Swap()
+	data.Swap = usageReport{Total: swap.Total, Used: swap.Used}
+	load := unit.Load()
+	data.Load = loadReport{Load1: load.Load1, Load5: load.Load5, Load15: load.Load15}
 
-	disk := monitoring.Disk()
-	data["disk"] = map[string]interface{}{
-		"total": disk.Total,
-		"used":  disk.Used,
-	}
+	disk := unit.Disk()
+	data.Disk = usageReport{Total: disk.Total, Used: disk.Used}
 
-	totalUp, totalDown, networkUp, networkDown, err := monitoring.NetworkSpeed()
+	totalUp, totalDown, networkUp, networkDown, err := unit.NetworkSpeed()
 	if err != nil {
 		message += fmt.Sprintf("failed to get network speed: %v\n", err)
 	}
-	data["network"] = map[string]interface{}{
-		"up":        networkUp,
-		"down":      networkDown,
-		"totalUp":   totalUp,
-		"totalDown": totalDown,
-	}
+	data.Network = networkReport{Up: networkUp, Down: networkDown, TotalUp: totalUp, TotalDown: totalDown}
 
-	tcpCount, udpCount, err := monitoring.ConnectionsCount()
+	tcpCount, udpCount, err := unit.ConnectionsCount()
 	if err != nil {
 		message += fmt.Sprintf("failed to get connections: %v\n", err)
 	}
-	data["connections"] = map[string]interface{}{
-		"tcp": tcpCount,
-		"udp": udpCount,
-	}
+	data.Connections = connectionsReport{TCP: tcpCount, UDP: udpCount}
 
-	uptime, err := monitoring.Uptime()
+	uptime, err := unit.Uptime()
 	if err != nil {
 		message += fmt.Sprintf("failed to get uptime: %v\n", err)
 	}
-	data["uptime"] = uptime
+	data.Uptime = uptime
 
-	processcount := monitoring.ProcessCount()
-	data["process"] = processcount
+	data.Process = unit.ProcessCount()
 
 	// GPU监控 - 根据标志决定详细程度
 	if flags.EnableGPU {
 		// 详细GPU监控模式
-		gpuInfo, err := monitoring.GetDetailedGPUInfo()
+		gpuInfo, err := unit.GetDetailedGPUInfo()
 		if err != nil {
 			message += fmt.Sprintf("failed to get detailed GPU info: %v\n", err)
 			// 降级到基础GPU信息
-			gpuNames, nameErr := monitoring.GetDetailedGPUHost()
+			gpuNames, nameErr := unit.GetDetailedGPUHost()
 			if nameErr == nil && len(gpuNames) > 0 {
-				data["gpu"] = map[string]interface{}{
-					"models": gpuNames,
-				}
+				data.GPU = gpuModelsReport{Models: gpuNames}
 			}
-		} else {
+		} else if len(gpuInfo) > 0 {
 			// 成功获取详细信息
-			gpuData := make([]map[string]interface{}, len(gpuInfo))
+			gpuData := make([]gpuDeviceReport, len(gpuInfo))
 			totalGPUUsage := 0.0
 
 			for i, info := range gpuInfo {
-				gpuData[i] = map[string]interface{}{
-					"name":         info.Name,
-					"memory_total": info.MemoryTotal,
-					"memory_used":  info.MemoryUsed,
-					"utilization":  info.Utilization,
-					"temperature":  info.Temperature,
+				gpuData[i] = gpuDeviceReport{
+					Name:        info.Name,
+					MemoryTotal: info.MemoryTotal,
+					MemoryUsed:  info.MemoryUsed,
+					Utilization: info.Utilization,
+					Temperature: info.Temperature,
 				}
 				totalGPUUsage += info.Utilization
 			}
 
 			avgGPUUsage := totalGPUUsage / float64(len(gpuInfo))
-
-			data["gpu"] = map[string]interface{}{
-				"count":         len(gpuInfo),
-				"average_usage": avgGPUUsage,
-				"detailed_info": gpuData,
-			}
+			data.GPU = gpuReport{Count: len(gpuInfo), AverageUsage: avgGPUUsage, DetailedInfo: gpuData}
 		}
 	}
 	// 基础模式下，GPU信息已在basicInfo中处理
 
-	data["message"] = message
+	data.Message = message
 
 	s, err := json.Marshal(data)
 	if err != nil {
