@@ -50,6 +50,15 @@ func getFromLspci() string {
 		return false
 	}
 
+	var result []string
+	appendName := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || isExcluded(name) {
+			return
+		}
+		result = append(result, name)
+	}
+
 	extractName := func(line string) string {
 		// 取最后一个冒号之后的内容
 		idx := strings.LastIndex(line, ":")
@@ -77,12 +86,14 @@ func getFromLspci() string {
 		for _, vendor := range priorityVendors {
 			if strings.Contains(lower, vendor) {
 				name := extractName(line)
-				if name != "" && !isExcluded(name) {
-					// 找到独显立刻返回
-					return name
-				}
+				appendName(name)
+				break
 			}
 		}
+	}
+
+	if len(result) > 0 {
+		return formatGPUNameList(result)
 	}
 
 	// 任意非黑名单的 VGA 设备
@@ -90,10 +101,12 @@ func getFromLspci() string {
 		lower := strings.ToLower(line)
 		if strings.Contains(lower, "vga") || strings.Contains(lower, "3d") || strings.Contains(lower, "display") {
 			name := extractName(line)
-			if name != "" && !isExcluded(name) {
-				return name
-			}
+			appendName(name)
 		}
+	}
+
+	if len(result) > 0 {
+		return formatGPUNameList(result)
 	}
 
 	return "None"
@@ -117,7 +130,20 @@ func getFromSysfsDRM() string {
 		"cirrus-qemu": true,
 	}
 
+	var result []string
+	appendName := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		result = append(result, name)
+	}
+
 	for _, path := range matches {
+		if matched, _ := regexp.MatchString(`card[0-9]+$`, path); !matched {
+			continue
+		}
+
 		// 驱动名称
 		driverLink, err := os.Readlink(filepath.Join(path, "device", "driver"))
 		if err != nil {
@@ -140,36 +166,41 @@ func getFromSysfsDRM() string {
 
 		// 有具体型号则直接返回
 		if exactModel != "" {
-			return exactModel
+			appendName(exactModel)
+			continue
 		}
 
 		// 通用的驱动名称映射
 		switch driverName {
 		case "vc4", "vc4-drm":
-			return "Broadcom VideoCore IV/VI (Raspberry Pi)"
+			appendName("Broadcom VideoCore IV/VI (Raspberry Pi)")
 		case "v3d", "v3d-drm":
-			return "Broadcom V3D (Raspberry Pi 4/5)"
+			appendName("Broadcom V3D (Raspberry Pi 4/5)")
 		case "msm", "msm_drm":
-			return "Qualcomm Adreno (Unknown Model)"
+			appendName("Qualcomm Adreno (Unknown Model)")
 		case "panfrost":
-			return "ARM Mali (Panfrost)"
+			appendName("ARM Mali (Panfrost)")
 		case "lima":
-			return "ARM Mali (Lima)"
+			appendName("ARM Mali (Lima)")
 		case "sun4i-drm", "sunxi-drm":
-			return "Allwinner Display Engine"
+			appendName("Allwinner Display Engine")
 		case "tegra":
-			return "NVIDIA Tegra"
+			appendName("NVIDIA Tegra")
 		case "ast": // LXC 容器映射物理显卡
-			return "ASPEED Technology, Inc. ASPEED Graphics Family"
+			appendName("ASPEED Technology, Inc. ASPEED Graphics Family")
 		case "i915", "i915-drm":
-			return "Intel Integrated Graphics"
+			appendName("Intel Integrated Graphics")
 		case "mgag200":
-			return "Matrox G200 Series"
+			appendName("Matrox G200 Series")
+		default:
+			if driverName != "" {
+				appendName("Direct Render Manager " + driverName)
+			}
 		}
+	}
 
-		if driverName != "" {
-			return "Direct Render Manager " + driverName
-		}
+	if len(result) > 0 {
+		return formatGPUNameList(result)
 	}
 
 	// 开发板 Model

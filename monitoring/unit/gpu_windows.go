@@ -277,18 +277,17 @@ func GetGPUs() ([]GPUInfo, error) {
 }
 
 func GpuName() string {
-	result := ""
 	gpus, err := GetGPUs()
 	if err != nil {
 		return "Unknown"
 	}
 
 	type GPUKey struct {
-		VendorId uint32
-		DeviceId uint32
-		Revision uint32
+		LUIDHighPart int32
+		LUIDLowPart  uint32
 	}
 	seenGPUs := make(map[GPUKey]bool)
+	var names []string
 
 	for _, gpu := range gpus {
 		if (gpu.Flags & (1 << 1)) != 0 { // DXGI_ADAPTER_FLAG_SOFTWARE
@@ -296,21 +295,17 @@ func GpuName() string {
 		}
 
 		key := GPUKey{
-			VendorId: gpu.VendorId,
-			DeviceId: gpu.DeviceId,
-			Revision: gpu.Revision,
+			LUIDHighPart: gpu.LUIDHighPart,
+			LUIDLowPart:  gpu.LUIDLowPart,
 		}
 
 		if !seenGPUs[key] {
 			seenGPUs[key] = true
 			name := gpu.Name
 			if name != "" {
-				result += name + ", "
+				names = append(names, name)
 			}
 		}
 	}
-	if len(result) > 2 {
-		return result[:len(result)-2]
-	}
-	return "None"
+	return formatGPUNameList(names)
 }
