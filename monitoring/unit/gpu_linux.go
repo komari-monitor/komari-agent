@@ -41,7 +41,7 @@ func getFromLspci() string {
 
 	priorityVendors := []string{"nvidia", "amd", "radeon", "intel", "arc", "snap", "qualcomm", "snapdragon"}
 
-	isExcluded := func(name string) bool {
+	isExcludedGPUName := func(name string) bool {
 		for _, pattern := range excludePatterns {
 			if matched, _ := regexp.MatchString(pattern, name); matched {
 				return true
@@ -53,7 +53,7 @@ func getFromLspci() string {
 	var result []string
 	appendName := func(name string) {
 		name = strings.TrimSpace(name)
-		if name == "" || isExcluded(name) {
+		if name == "" || isExcludedGPUName(name) {
 			return
 		}
 		result = append(result, name)
@@ -133,14 +133,14 @@ func getFromSysfsDRM() string {
 	var result []string
 	appendName := func(name string) {
 		name = strings.TrimSpace(name)
-		if name == "" {
+		if name == "" || isExcludedSysfsGPUName(name) {
 			return
 		}
 		result = append(result, name)
 	}
 
 	for _, path := range matches {
-		if matched, _ := regexp.MatchString(`card[0-9]+$`, path); !matched {
+		if !isDRMCardPath(path) {
 			continue
 		}
 
@@ -213,6 +213,28 @@ func getFromSysfsDRM() string {
 	}
 
 	return "None"
+}
+
+func isDRMCardPath(path string) bool {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, "card") || len(base) == len("card") {
+		return false
+	}
+	for _, char := range base[len("card"):] {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isExcludedSysfsGPUName(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "virtio") ||
+		strings.Contains(lower, "vmware") ||
+		strings.Contains(lower, "qxl") ||
+		strings.Contains(lower, "hyper-v") ||
+		strings.Contains(lower, "cirrus")
 }
 
 // parseSocModel 解析设备树 compatible 字符串，提取人性化名称

@@ -25,8 +25,5 @@ func GpuName() string {
 		}
 	}
 
-	if len(names) > 0 {
-		return formatGPUNameList(names)
-	}
-	return "Unknown"
+	return formatGPUNameList(names)
 }

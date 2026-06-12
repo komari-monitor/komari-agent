@@ -286,7 +286,7 @@ func GpuName() string {
 		LUIDHighPart int32
 		LUIDLowPart  uint32
 	}
-	seenGPUs := make(map[GPUKey]bool)
+	seenGPUs := make(map[GPUKey]struct{})
 	var names []string
 
 	for _, gpu := range gpus {
@@ -299,8 +299,8 @@ func GpuName() string {
 			LUIDLowPart:  gpu.LUIDLowPart,
 		}
 
-		if !seenGPUs[key] {
-			seenGPUs[key] = true
+		if _, seen := seenGPUs[key]; !seen {
+			seenGPUs[key] = struct{}{}
 			name := gpu.Name
 			if name != "" {
 				names = append(names, name)
