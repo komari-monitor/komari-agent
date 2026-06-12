@@ -122,7 +122,7 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 	jsonData, _ := json.Marshal(payload)
 	endpoint := flags.Endpoint + "/api/clients/task/result?token=" + flags.Token
 
-	client := dnsresolver.GetHTTPClient(30 * time.Second)
+	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
 	maxRetry := flags.MaxRetries
 	for attempt := 0; attempt <= maxRetry; attempt++ {
 		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(jsonData))
@@ -387,7 +387,7 @@ func postV2RPC(payload interface{}) error {
 		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
 		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
 	}
-	client := dnsresolver.GetHTTPClient(30 * time.Second)
+	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

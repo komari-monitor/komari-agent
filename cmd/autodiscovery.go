@@ -138,7 +138,7 @@ func registerWithAutoDiscovery() error {
 	}
 
 	// 发送请求
-	client := dnsresolver.GetHTTPClient(30 * time.Second)
+	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send register request: %v", err)
