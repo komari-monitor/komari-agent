@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -29,20 +30,23 @@ var RootCmd = &cobra.Command{
 	Use:   "komari-agent",
 	Short: "komari agent",
 	Long:  `komari agent`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv() // 从环境变量加载配置，覆盖解析
 		if flags.ConfigFile != "" {
 			bytes, err := os.ReadFile(flags.ConfigFile)
 			if err != nil {
-				log.Fatalf("Failed to read config file: %v", err)
+				return fmt.Errorf("failed to read config file: %w", err)
 			}
 			err = json.Unmarshal(bytes, flags)
 			if err != nil {
-				log.Fatalf("Failed to parse config file: %v", err)
+				return fmt.Errorf("failed to parse config file: %w", err)
 			}
 		}
 		if flags.ProtocolVersion == 0 {
 			flags.ProtocolVersion = 2
+		}
+		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
+			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
 		}
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -96,8 +100,7 @@ var RootCmd = &cobra.Command{
 		if flags.AutoDiscoveryKey != "" {
 			err := handleAutoDiscovery()
 			if err != nil {
-				log.Printf("Auto-discovery failed: %v", err)
-				os.Exit(1)
+				return fmt.Errorf("auto-discovery failed: %w", err)
 			}
 		}
 		diskList, err := monitoring.DiskList()
@@ -148,6 +151,7 @@ func Execute() {
 
 	if err := RootCmd.Execute(); err != nil {
 		log.Println(err)
+		os.Exit(1)
 	}
 }
 
@@ -182,6 +186,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
 	RootCmd.PersistentFlags().IntVar(&flags.ProtocolVersion, "protocol-version", 2, "Report protocol version (1 or 2)")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable v2 gzip/permessage-deflate compression")
+	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
 }
 

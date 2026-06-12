@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +42,7 @@ var (
 type httpClientKey struct {
 	timeout          time.Duration
 	ignoreUnsafeCert bool
+	preferIPVersion  string
 }
 
 // SetCustomDNSServer 设置自定义DNS服务器
@@ -120,9 +120,12 @@ func GetCustomResolver() *net.Resolver {
 	}
 }
 
-// GetHTTPClient 返回一个使用自定义DNS解析器的HTTP客户端
 // buildTransport 构建带有自定义解析/拨号策略的 HTTP 传输层，可注入 TLS 配置
 func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transport {
+	return buildTransportWithPreference(timeout, tlsConfig, "")
+}
+
+func buildTransportWithPreference(timeout time.Duration, tlsConfig *tls.Config, preferIPVersion string) *http.Transport {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -138,20 +141,7 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 			if err != nil {
 				return nil, err
 			}
-			// 根据本机是否具备 IPv4 动态排序
-			preferIPv4 := preferIPv4First()
-			sort.SliceStable(ips, func(i, j int) bool {
-				ip1 := net.ParseIP(ips[i])
-				ip2 := net.ParseIP(ips[j])
-				if ip1 == nil || ip2 == nil {
-					return false
-				}
-				if preferIPv4 {
-					return ip1.To4() != nil && ip2.To4() == nil
-				}
-				// IPv6 优先
-				return ip1.To4() == nil && ip2.To4() != nil
-			})
+			sortIPsByPreference(ips, preferIPVersion)
 			for _, ip := range ips {
 				dialer := &net.Dialer{
 					Timeout:   timeout,
@@ -177,19 +167,29 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 }
 
 func GetHTTPClient(timeout time.Duration) *http.Client {
+	return getHTTPClient(timeout, "")
+}
+
+// GetHTTPClientWithPreference 返回一个使用自定义解析器并按指定 IP 版本排序的 HTTP 客户端。
+// preferIPVersion 为 "4" 或 "6" 时固定优先对应地址；为空时保留自动选择逻辑。
+func GetHTTPClientWithPreference(timeout time.Duration, preferIPVersion string) *http.Client {
+	return getHTTPClient(timeout, normalizeIPVersionPreference(preferIPVersion))
+}
+
+func getHTTPClient(timeout time.Duration, preferIPVersion string) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	key := httpClientKey{timeout: timeout, ignoreUnsafeCert: flags.IgnoreUnsafeCert}
+	key := httpClientKey{timeout: timeout, ignoreUnsafeCert: flags.IgnoreUnsafeCert, preferIPVersion: preferIPVersion}
 	httpClientMu.Lock()
 	defer httpClientMu.Unlock()
 	if client := httpClients[key]; client != nil {
 		return client
 	}
 	client := &http.Client{
-		Transport: buildTransport(timeout, &tls.Config{
+		Transport: buildTransportWithPreference(timeout, &tls.Config{
 			InsecureSkipVerify: flags.IgnoreUnsafeCert,
-		}),
+		}, preferIPVersion),
 		Timeout: timeout,
 	}
 	httpClients[key] = client
@@ -211,14 +211,21 @@ func GetNetDialer(timeout time.Duration) *net.Dialer {
 
 // GetDialContext 返回一个自定义 DialContext：
 // - 使用自定义解析器解析主机名
-// - 优先尝试 IPv4，再尝试 IPv6
+// - 根据本机网络自动选择 IPv4 或 IPv6 优先
 // - 逐个 IP 进行连接尝试，直到成功或全部失败
 func GetDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return GetDialContextWithPreference(timeout, "")
+}
+
+// GetDialContextWithPreference 返回一个可显式指定 IPv4/IPv6 优先级的 DialContext。
+// preferIPVersion 为 "4" 或 "6" 时固定优先对应地址；为空时保留自动选择逻辑。
+func GetDialContextWithPreference(timeout time.Duration, preferIPVersion string) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
 
 	resolver := GetCustomResolver()
+	preferIPVersion = normalizeIPVersionPreference(preferIPVersion)
 
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
@@ -235,20 +242,7 @@ func GetDialContext(timeout time.Duration) func(ctx context.Context, network, ad
 			return nil, err
 		}
 
-		// 根据本机是否具备 IPv4 动态排序
-		preferIPv4 := preferIPv4First()
-		sort.SliceStable(ips, func(i, j int) bool {
-			ip1 := net.ParseIP(ips[i])
-			ip2 := net.ParseIP(ips[j])
-			if ip1 == nil || ip2 == nil {
-				return false
-			}
-			if preferIPv4 {
-				return ip1.To4() != nil && ip2.To4() == nil
-			}
-			// IPv6 优先
-			return ip1.To4() == nil && ip2.To4() != nil
-		})
+		sortIPsByPreference(ips, preferIPVersion)
 
 		// 逐个 IP 尝试连接
 		for _, ip := range ips {
@@ -264,6 +258,40 @@ func GetDialContext(timeout time.Duration) func(ctx context.Context, network, ad
 		}
 		return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
 	}
+}
+
+func normalizeIPVersionPreference(preferIPVersion string) string {
+	if preferIPVersion == "4" || preferIPVersion == "6" {
+		return preferIPVersion
+	}
+	return ""
+}
+
+func sortIPsByPreference(ips []string, preferIPVersion string) {
+	preferIPVersion = normalizeIPVersionPreference(preferIPVersion)
+	if preferIPVersion == "" {
+		// 根据本机是否具备 IPv4 动态排序
+		if preferIPv4First() {
+			preferIPVersion = "4"
+		} else {
+			preferIPVersion = "6"
+		}
+	}
+
+	preferred := make([]string, 0, len(ips))
+	others := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		parsedIP := net.ParseIP(ip)
+		isIPv4 := parsedIP != nil && parsedIP.To4() != nil
+		isIPv6 := parsedIP != nil && parsedIP.To4() == nil
+		if (preferIPVersion == "4" && isIPv4) || (preferIPVersion == "6" && isIPv6) {
+			preferred = append(preferred, ip)
+		} else {
+			others = append(others, ip)
+		}
+	}
+	n := copy(ips, preferred)
+	copy(ips[n:], others)
 }
 
 // preferIPv4First 检测本机是否存在可用的 IPv4 地址，若没有则在连接尝试中优先 IPv6
