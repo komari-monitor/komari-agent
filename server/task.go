@@ -120,7 +120,7 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 	}
 
 	jsonData, _ := json.Marshal(payload)
-	endpoint := flags.Endpoint + "/api/clients/task/result?token=" + flags.Token
+	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/task/result?token=" + flags.Token
 
 	client := dnsresolver.GetHTTPClient(30 * time.Second)
 	maxRetry := flags.MaxRetries
