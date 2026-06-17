@@ -17,12 +17,13 @@ func GpuName() string {
 	}
 
 	lines := strings.Split(string(output), "\n")
+	var names []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "Chipset Model:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "Chipset Model:"))
+			names = append(names, strings.TrimSpace(strings.TrimPrefix(line, "Chipset Model:")))
 		}
 	}
 
-	return "Unknown"
+	return formatGPUNameList(names)
 }

@@ -17,12 +17,13 @@ func GpuName() string {
 	}
 
 	lines := strings.Split(string(output), "\n")
+	var names []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.Contains(line, "VGA") || strings.Contains(line, "Display") {
-			return line
+			names = append(names, line)
 		}
 	}
 
-	return "Unknown"
+	return formatGPUNameList(names)
 }
