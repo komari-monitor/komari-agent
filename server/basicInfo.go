@@ -124,7 +124,7 @@ func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int)
 		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
 	}
 
-	client := dnsresolver.GetHTTPClient(30 * time.Second)
+	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
 
 	resp, err := client.Do(req)
 	if err != nil {

@@ -273,7 +273,7 @@ func postV2RequestContext(ctx context.Context, payload []byte) (*v2.Response, er
 		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
 		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
 	}
-	client := dnsresolver.GetHTTPClient(35 * time.Second)
+	client := dnsresolver.GetHTTPClientWithPreference(35*time.Second, flags.PreferIPVersion)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -504,7 +504,7 @@ func establishTerminalConnection(token, id, endpoint string) {
 func newWSDialer() *websocket.Dialer {
 	d := &websocket.Dialer{
 		HandshakeTimeout:  15 * time.Second,
-		NetDialContext:    dnsresolver.GetDialContext(15 * time.Second),
+		NetDialContext:    dnsresolver.GetDialContextWithPreference(15*time.Second, flags.PreferIPVersion),
 		Proxy:             http.ProxyFromEnvironment,
 		EnableCompression: !flags.DisableCompression,
 	}
