@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -67,17 +66,9 @@ func newTerminalImpl() (*terminalImpl, error) {
 		return nil, fmt.Errorf("no supported shell found among %v", defaultShells)
 	}
 
-	shellArgv0 := filepath.Base(shell)
+	shellCmd := "for f in /etc/update-motd.d/*; do [ -e \"$f\" ] && [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$1\""
 
-	var prefixCmd string
-	if shellArgv0 == "zsh" {
-		prefixCmd = "unsetopt NOMATCH 2>/dev/null; "
-	}
-
-	shellCmd := prefixCmd + "for f in /etc/update-motd.d/*; do [ -e \"$f\" ] && [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$0\""
-
-	cmd := exec.Command(shell, "-c", shellCmd)
-	cmd.Args[0] = shellArgv0
+	cmd := exec.Command("/bin/sh", "-c", shellCmd, "komari-motd", shell)
 	cmd.Env = append(os.Environ(), // 继承系统环境变量
 		"TERM=xterm-256color", // 设置终端类型，提高兼容性
 		"LANG=C.UTF-8",        // 设置语言环境为 UTF-8
