@@ -21,6 +21,17 @@ type CpuInfo struct {
 }
 
 func Cpu() CpuInfo {
+	cpuinfo := CpuStaticInfo()
+
+	percentages, err := cpu.Percent(0, false)
+	if err == nil && len(percentages) > 0 {
+		cpuinfo.CPUUsage = percentages[0]
+	}
+
+	return cpuinfo
+}
+
+func CpuStaticInfo() CpuInfo {
 	cpuinfo := CpuInfo{
 		CPUName:          "Unknown",
 		CPUArchitecture:  runtime.GOARCH,
@@ -55,11 +66,6 @@ func Cpu() CpuInfo {
 	physicalCores, err := cpu.Counts(false)
 	if err == nil && physicalCores > 0 {
 		cpuinfo.CPUPhysicalCores = physicalCores
-	}
-
-	percentages, err := cpu.Percent(0, false)
-	if err == nil && len(percentages) > 0 {
-		cpuinfo.CPUUsage = percentages[0]
 	}
 
 	return cpuinfo

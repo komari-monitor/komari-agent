@@ -38,7 +38,7 @@ func UpdateBasicInfo() {
 	}
 }
 func uploadBasicInfo() error {
-	cpu := monitoring.Cpu()
+	cpu := monitoring.CpuStaticInfo()
 
 	osname := monitoring.OSName()
 	kernelVersion := monitoring.KernelVersion()
