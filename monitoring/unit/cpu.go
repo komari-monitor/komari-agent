@@ -5,7 +5,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"time"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -58,7 +57,7 @@ func Cpu() CpuInfo {
 		cpuinfo.CPUPhysicalCores = physicalCores
 	}
 
-	percentages, err := cpu.Percent(1*time.Second, false)
+	percentages, err := cpu.Percent(0, false)
 	if err == nil && len(percentages) > 0 {
 		cpuinfo.CPUUsage = percentages[0]
 	}
