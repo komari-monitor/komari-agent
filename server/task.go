@@ -243,22 +243,26 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 		target = "http://" + target
 	}
 
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// 在 Dial 之前解析 IP，排除 DNS 时间
-				host, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, err
-				}
-				ip, err := resolveIP(host)
-				if err != nil {
-					return nil, err
-				}
-				return net.DialTimeout(network, net.JoinHostPort(ip, port), timeout)
-			},
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// 在 Dial 之前解析 IP，排除 DNS 时间
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ip, err := resolveIP(host)
+			if err != nil {
+				return nil, err
+			}
+			return net.DialTimeout(network, net.JoinHostPort(ip, port), timeout)
 		},
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
 	}
 	start := time.Now()
 	resp, err := client.Get(target)
