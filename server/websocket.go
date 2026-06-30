@@ -38,7 +38,7 @@ func EstablishWebSocketConnection() {
 		resetConnectionProtocolVersion()
 	}()
 	var err error
-	interval := math.Max(1, flags.Interval-1)
+	interval := math.Max(1, flags.Interval)
 
 	dataTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
 	defer dataTicker.Stop()
