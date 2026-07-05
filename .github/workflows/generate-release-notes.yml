@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   update-release-notes:
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
     runs-on: ubuntu-latest
 
     steps:

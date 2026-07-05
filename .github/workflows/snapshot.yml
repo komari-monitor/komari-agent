@@ -1,0 +1,241 @@
+name: Publish Snapshot
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Ensure snapshot target is main
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "Snapshot builds must run from refs/heads/main. Current ref: ${GITHUB_REF}"
+            exit 1
+          fi
+
+          git fetch --no-tags --depth=1 origin main
+          MAIN_SHA="$(git rev-parse FETCH_HEAD)"
+
+          if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
+            echo "Snapshot builds must use the current main commit."
+            echo "Workflow SHA: ${GITHUB_SHA}"
+            echo "Current main: ${MAIN_SHA}"
+            exit 1
+          fi
+
+  prepare:
+    needs: validate-ref
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Generate snapshot version
+        id: version
+        run: |
+          VERSION="Snapshot-$(date -u +%y%m%d%H%M)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Snapshot version: ${VERSION}"
+
+  build-and-attach-binaries:
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        exclude:
+          - goos: windows
+            goarch: arm
+          - goos: darwin
+            goarch: 386
+          - goos: darwin
+            goarch: arm
+        goos: [windows, linux, darwin, freebsd]
+        goarch: [amd64, arm64, 386, arm]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME=${BINARY_NAME}.exe
+          fi
+          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
+
+  publish-snapshot-release:
+    needs: [prepare, build-and-attach-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure commit is still current main
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          MAIN_SHA="$(git rev-parse FETCH_HEAD)"
+
+          if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
+            echo "Snapshot publish skipped because a newer main commit exists."
+            echo "Workflow SHA: ${GITHUB_SHA}"
+            echo "Current main: ${MAIN_SHA}"
+            exit 1
+          fi
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create snapshot prerelease and upload binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euxo pipefail
+          echo "Snapshot version: ${VERSION}"
+          ls -alR artifacts
+
+          if gh release view "${VERSION}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists, deleting it before recreation..."
+            gh release delete "${VERSION}" --repo "${{ github.repository }}" --cleanup-tag --yes
+          fi
+
+          gh release create "${VERSION}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "${VERSION}" \
+            --notes "Automated snapshot build (${VERSION}) from commit ${{ github.sha }}." \
+            --prerelease \
+            artifacts/komari-agent-*
+
+          gh release list \
+            --repo "${{ github.repository }}" \
+            --limit 1000 \
+            --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease and (.tagName | startswith("Snapshot-"))) | .tagName' |
+          while IFS= read -r tag; do
+            if [ -z "${tag}" ] || [ "${tag}" = "${VERSION}" ]; then
+              continue
+            fi
+
+            echo "Deleting old snapshot release ${tag}..."
+            gh release delete "${tag}" --repo "${{ github.repository }}" --cleanup-tag --yes
+          done
+        shell: bash
+
+  build-and-push-docker:
+    needs: [prepare, publish-snapshot-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure commit is still current main
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          MAIN_SHA="$(git rev-parse FETCH_HEAD)"
+
+          if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
+            echo "Snapshot Docker publish skipped because a newer main commit exists."
+            echo "Workflow SHA: ${GITHUB_SHA}"
+            echo "Current main: ${MAIN_SHA}"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build static binaries for multi-arch
+        env:
+          GOOS: linux
+          CGO_ENABLED: 0
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          LDFLAGS="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}"
+
+          echo "Building for linux/amd64..."
+          GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o komari-agent-linux-amd64
+
+          echo "Building for linux/arm64..."
+          GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o komari-agent-linux-arm64
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=snapshot
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: true
+          provenance: false
