@@ -269,10 +269,6 @@ func postV2RequestContext(ctx context.Context, payload []byte) (*v2.Response, er
 	if compressed {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
 	client := dnsresolver.GetHTTPClientWithPreference(35*time.Second, flags.PreferIPVersion)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -360,9 +356,7 @@ func markV2EventSeen(id string) bool {
 func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 	dialer := newWSDialer()
 
-	headers := newWSHeaders()
-
-	conn, resp, err := dialer.Dial(websocketEndpoint, headers)
+	conn, resp, err := dialer.Dial(websocketEndpoint, nil)
 	if err != nil {
 		if resp != nil && resp.StatusCode != 101 {
 			return nil, &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
@@ -485,9 +479,7 @@ func establishTerminalConnection(token, id, endpoint string) {
 	// 使用与主 WS 相同的拨号策略
 	dialer := newWSDialer()
 
-	headers := newWSHeaders()
-
-	conn, _, err := dialer.Dial(endpoint, headers)
+	conn, _, err := dialer.Dial(endpoint, nil)
 	if err != nil {
 		log.Println("Failed to establish terminal connection:", err)
 		return
@@ -512,14 +504,4 @@ func newWSDialer() *websocket.Dialer {
 		d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return d
-}
-
-// newWSHeaders 统一构造 WS 请求头（含 Cloudflare Access 头）
-func newWSHeaders() http.Header {
-	headers := http.Header{}
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		headers.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		headers.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
-	return headers
 }

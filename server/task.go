@@ -131,10 +131,6 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-			req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-			req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-		}
 
 		resp, err := client.Do(req)
 		if resp != nil {
@@ -386,10 +382,6 @@ func postV2RPC(payload interface{}) error {
 	req.Header.Set("Content-Type", "application/json")
 	if compressed {
 		req.Header.Set("Content-Encoding", "gzip")
-	}
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
 	}
 	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
 	resp, err := client.Do(req)

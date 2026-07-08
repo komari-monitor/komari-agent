@@ -118,12 +118,6 @@ func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int)
 		req.Header.Set("Content-Encoding", "gzip")
 	}
 
-	// 添加Cloudflare Access头部
-	if flags.CFAccessClientID != "" && flags.CFAccessClientSecret != "" {
-		req.Header.Set("CF-Access-Client-Id", flags.CFAccessClientID)
-		req.Header.Set("CF-Access-Client-Secret", flags.CFAccessClientSecret)
-	}
-
 	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
 
 	resp, err := client.Do(req)
