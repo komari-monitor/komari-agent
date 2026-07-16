@@ -7,7 +7,7 @@ $White = 'White'
 
 # OS/ARCH matrix
 $osList = @('windows', 'linux', 'darwin', 'freebsd')
-$archList = @('amd64', 'arm64', '386', 'arm')
+$archList = @('amd64', 'arm64', '386', 'arm', 'loong64')
 
 # Ensure build directory
 $buildDir = Join-Path -Path (Get-Location) -ChildPath 'build'
@@ -28,9 +28,10 @@ $failedBuilds = @()
 
 foreach ($goos in $osList) {
     foreach ($goarch in $archList) {
-        # Skip unsupported combos: windows/arm, darwin/386, darwin/arm
+        # Skip loong64 outside Linux and existing unsupported combinations.
         if ((($goos -eq 'windows') -and ($goarch -eq 'arm')) -or
-            (($goos -eq 'darwin') -and (($goarch -eq '386') -or ($goarch -eq 'arm')))) {
+            (($goos -eq 'darwin') -and (($goarch -eq '386') -or ($goarch -eq 'arm'))) -or
+            (($goos -ne 'linux') -and ($goarch -eq 'loong64'))) {
             continue
         }
 

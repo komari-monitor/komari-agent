@@ -8,7 +8,7 @@ NC='\033[0m' # 无颜色
 
 # 定义操作系统和架构列表
 OS_LIST=("windows" "linux" "darwin" "freebsd")
-ARCH_LIST=("amd64" "arm64" "386" "arm")
+ARCH_LIST=("amd64" "arm64" "386" "arm" "loong64")
 
 # 创建构建目录
 mkdir -p ./build
@@ -22,9 +22,10 @@ FAILED_BUILDS=()
 # 遍历操作系统和架构组合
 for GOOS in "${OS_LIST[@]}"; do
   for GOARCH in "${ARCH_LIST[@]}"; do
-    # 排除 windows/arm, darwin/386 和 darwin/arm
+    # 排除仅由 Linux 支持的 loong64，以及 windows/arm、darwin/386 和 darwin/arm
     if { [ "$GOOS" = "windows" ] && [ "$GOARCH" = "arm" ]; } || \
-       { [ "$GOOS" = "darwin" ] && { [ "$GOARCH" = "386" ] || [ "$GOARCH" = "arm" ]; }; }; then
+       { [ "$GOOS" = "darwin" ] && { [ "$GOARCH" = "386" ] || [ "$GOARCH" = "arm" ]; }; } || \
+       { [ "$GOOS" != "linux" ] && [ "$GOARCH" = "loong64" ]; }; then
       continue
     fi
 

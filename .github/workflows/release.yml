@@ -21,6 +21,9 @@ jobs:
             goarch: 386
           - goos: darwin
             goarch: arm
+        include:
+          - goos: linux
+            goarch: loong64
         goos: [windows, linux, darwin, freebsd]
         goarch: [amd64, arm64, 386, arm]
 

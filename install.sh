@@ -248,6 +248,9 @@ case $arch in
     aarch64|arm64)
         arch="arm64"
         ;;
+    loongarch64|loong64)
+        arch="loong64"
+        ;;
     i386|i686)
         # x86 (32-bit) support
         case $os_name in
