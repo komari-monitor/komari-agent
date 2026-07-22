@@ -40,6 +40,9 @@ service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
 install_version="" # New parameter for specifying version
+install_dir_specified=false
+service_user="${SUDO_USER:-$(id -un)}"
+user_service=false
  
 
 # Detect OS
@@ -76,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir)
             target_dir="$2"
+            install_dir_specified=true
             shift 2
             ;;
         --install-service-name)
@@ -105,19 +109,26 @@ done
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
 
-komari_agent_path="${target_dir}/agent"
-
-# macOS doesn't always require sudo for everything
-if [ "$os_name" = "darwin" ] && command -v brew >/dev/null 2>&1; then
-    # On macOS with Homebrew, we can run without root for dependencies
-    require_root_for_deps=false
-else
-    require_root_for_deps=true
+# A direct, unprivileged installation belongs entirely to the invoking user.
+if [ "$EUID" -ne 0 ] && [ "$install_dir_specified" = false ]; then
+    case "$os_name" in
+        linux|freebsd)
+            target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/komari"
+            ;;
+    esac
 fi
 
-if [ "$EUID" -ne 0 ] && [ "$require_root_for_deps" = true ]; then
-    log_error "Please run as root"
-    exit 1
+komari_agent_path="${target_dir}/agent"
+
+# User services are the only service type a non-root Linux installation can manage.
+if [ "$EUID" -ne 0 ] && [ "$os_name" = "linux" ]; then
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        user_service=true
+    else
+        log_error "A non-root Linux installation requires a running systemd user session"
+        log_info "Log in through systemd or install with elevated privileges."
+        exit 1
+    fi
 fi
 
 echo -e "${WHITE}===========================================${NC}"
@@ -126,6 +137,7 @@ echo -e "${WHITE}===========================================${NC}"
 echo ""
 log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
+log_config "  Service user: ${GREEN}$service_user${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
@@ -141,7 +153,15 @@ uninstall_previous() {
     log_step "Checking for previous installation..."
     
     # Stop and disable service if it exists
-    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "${service_name}.service"; then
+    if [ "$user_service" = true ]; then
+        if systemctl --user list-unit-files | grep -q "${service_name}.service"; then
+            log_info "Stopping and disabling existing systemd user service..."
+            systemctl --user stop "${service_name}.service" || true
+            systemctl --user disable "${service_name}.service" || true
+            rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${service_name}.service"
+            systemctl --user daemon-reload
+        fi
+    elif command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "${service_name}.service"; then
         log_info "Stopping and disabling existing systemd service..."
         systemctl stop ${service_name}.service
         systemctl disable ${service_name}.service
@@ -201,6 +221,11 @@ install_dependencies() {
     done
 
     if [ -n "$missing_deps" ]; then
+        if [ "$EUID" -ne 0 ]; then
+            log_error "Missing required dependencies:$missing_deps"
+            log_info "Install them with your system package manager, then run this script again."
+            exit 1
+        fi
         # Check package manager and install dependencies
         if command -v apt >/dev/null 2>&1; then
             log_info "Using apt to install dependencies..."
@@ -308,6 +333,9 @@ fi
 
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
+if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
+    chown "$service_user" "$target_dir"
+fi
 
 # Download binary
 if [ -n "$github_proxy" ]; then
@@ -324,6 +352,9 @@ fi
 
 # Set executable permissions
 chmod +x "$komari_agent_path"
+if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
+    chown "$service_user" "$komari_agent_path"
+fi
 log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
 # Detect init system and configure service
@@ -419,6 +450,9 @@ detect_init_system() {
 }
 
 init_system=$(detect_init_system)
+if [ "$user_service" = true ]; then
+    init_system="systemd-user"
+fi
 log_info "Detected init system: ${GREEN}$init_system${NC}"
 
 # Handle each init system
@@ -435,7 +469,7 @@ if [ "$init_system" = "nixos" ]; then
     echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${komari_args}\";${NC}"
     echo -e "${CYAN}    WorkingDirectory = \"${target_dir}\";${NC}"
     echo -e "${CYAN}    Restart = \"always\";${NC}"
-    echo -e "${CYAN}    User = \"root\";${NC}"
+    echo -e "${CYAN}    User = \"${service_user}\";${NC}"
     echo -e "${CYAN}  };${NC}"
     echo -e "${CYAN}};${NC}"
     echo ""
@@ -452,7 +486,7 @@ name="Komari Agent Service"
 description="Komari monitoring agent"
 command="${komari_agent_path}"
 command_args="${komari_args}"
-command_user="root"
+command_user="${service_user}"
 directory="${target_dir}"
 pidfile="/run/${service_name}.pid"
 retry="SIGTERM/30"
@@ -469,6 +503,28 @@ EOF
     rc-update add ${service_name} default
     rc-service ${service_name} start
     log_success "OpenRC service configured and started"
+elif [ "$init_system" = "systemd-user" ]; then
+    log_info "Using systemd user service management"
+    service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    service_file="${service_dir}/${service_name}.service"
+    mkdir -p "$service_dir"
+    cat > "$service_file" << EOF
+[Unit]
+Description=Komari Agent Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${komari_agent_path} ${komari_args}
+WorkingDirectory=${target_dir}
+Restart=always
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now "${service_name}.service"
+    log_success "Systemd user service configured and started"
 elif [ "$init_system" = "systemd" ]; then
     # Systemd service configuration
     log_info "Using systemd for service management"
@@ -483,7 +539,7 @@ Type=simple
 ExecStart=${komari_agent_path} ${komari_args}
 WorkingDirectory=${target_dir}
 Restart=always
-User=root
+User=${service_user}
 
 [Install]
 WantedBy=multi-user.target
@@ -515,7 +571,7 @@ start_service() {
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1
-    procd_set_param user root
+    procd_set_param user ${service_user}
     procd_close_instance
 }
 
@@ -552,7 +608,6 @@ elif [ "$init_system" = "launchd" ]; then
         plist_dir="/Library/LaunchDaemons"
         plist_file="$plist_dir/com.komari.${service_name}.plist"
         log_info "Installing as system-level service (LaunchDaemon)"
-        service_user="root"
         log_dir="/var/log"
     fi
     
@@ -627,6 +682,8 @@ respawn limit 10 5
 umask 022
 
 console none
+
+setuid ${service_user}
 
 pre-start script
     test -x ${komari_agent_path} || { stop; exit 0; }
