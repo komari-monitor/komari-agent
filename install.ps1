@@ -8,6 +8,28 @@ function Log-Error { param([string]$Message) Write-Host "[ERROR] $Message"    -F
 function Log-Step { param([string]$Message) Write-Host "$Message"    -ForegroundColor Magenta }
 function Log-Config { param([string]$Message) Write-Host "- $Message"    -ForegroundColor White }
 
+# Build a proxy URL without accidentally prefixing the same proxy twice.
+# Some script mirrors rewrite embedded GitHub URLs in the script body, so we
+# assemble the release URL at runtime instead of keeping one literal that may
+# already have been rewritten before PowerShell executes it.
+function Join-ProxyUrl {
+    param(
+        [string]$Proxy,
+        [string]$Target
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Proxy)) {
+        return $Target
+    }
+
+    $trimmedProxy = $Proxy.TrimEnd('/')
+    if ($Target.StartsWith("$trimmedProxy/")) {
+        return $Target
+    }
+
+    return "$trimmedProxy/$Target"
+}
+
 # Default parameters
 $InstallDir = Join-Path $Env:ProgramFiles "Komari"
 $ServiceName = "komari-agent"
@@ -170,6 +192,11 @@ if ($InstallVersion -ne "") {
 # Paths
 $BinaryName = "komari-agent-windows-$arch.exe"
 $AgentPath = Join-Path $InstallDir "komari-agent.exe"
+$GitHubScheme = "https://"
+$GitHubHost = "github.com"
+# Split the GitHub release base into parts so raw script proxies are less
+# likely to rewrite it before the installer actually runs.
+$ReleaseBase = "$GitHubScheme$GitHubHost/komari-monitor/komari-agent/releases"
 
 # Uninstall previous service and binary
 function Uninstall-Previous {
@@ -207,28 +234,26 @@ function Uninstall-Previous {
 Uninstall-Previous
 
 $versionToInstall = ""
+$downloadPath = ""
 if ($InstallVersion -ne "") {
     Log-Info "Attempting to install specified version: $InstallVersion"
     $versionToInstall = $InstallVersion
+    $downloadPath = "download/$versionToInstall"
 }
 else {
-    $ApiUrl = "https://api.github.com/repos/komari-monitor/komari-agent/releases/latest"
-    try {
-        Log-Step "Fetching latest release version from GitHub API..."
-        $release = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
-        $versionToInstall = $release.tag_name
-        Log-Success "Latest version fetched: $versionToInstall"
-    }
-    catch {
-        Log-Error "Failed to fetch latest version: $_"
-        exit 1
-    }
+    # Use the GitHub releases "latest/download" endpoint directly so the
+    # installer can stay on the same download path whether or not a proxy is
+    # used, without requiring an extra GitHub API request first.
+    Log-Step "No version specified, downloading the latest release."
+    $versionToInstall = "latest"
+    $downloadPath = "latest/download"
 }
 Log-Success "Installing Komari Agent version: $versionToInstall"
 
 # Construct download URL
 $BinaryName = "komari-agent-windows-$arch.exe"
-$DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/komari-monitor/komari-agent/releases/download/$versionToInstall/$BinaryName" } else { "https://github.com/komari-monitor/komari-agent/releases/download/$versionToInstall/$BinaryName" }
+$ReleaseUrl = "$ReleaseBase/$downloadPath/$BinaryName"
+$DownloadUrl = if ($GitHubProxy) { Join-ProxyUrl $GitHubProxy $ReleaseUrl } else { $ReleaseUrl }
 
 # Download and install
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null

@@ -35,6 +35,29 @@ log_config() {
     echo -e "${CYAN}[CONFIG]${NC} $1"
 }
 
+# Build a proxy URL without accidentally prefixing the same proxy twice.
+# Some script mirrors rewrite embedded GitHub URLs in the script body, so we
+# normalize the final release URL at runtime instead of relying on raw string
+# literals that may already have been rewritten upstream.
+join_proxy_url() {
+    local proxy="${1%/}"
+    local target="$2"
+
+    if [ -z "$proxy" ]; then
+        printf '%s' "$target"
+        return
+    fi
+
+    case "$target" in
+        "${proxy}/"*)
+            printf '%s' "$target"
+            ;;
+        *)
+            printf '%s/%s' "$proxy" "$target"
+            ;;
+    esac
+}
+
 # Default values
 service_name="komari-agent"
 target_dir="/opt/komari"
@@ -323,12 +346,19 @@ else
     download_path="download/${version_to_install}"
 fi
 
+github_scheme="https://"
+github_host="github.com"
+# Split the GitHub release base into parts so raw script proxies are less
+# likely to rewrite it before the installer actually runs.
+github_release_base="${github_scheme}${github_host}/komari-monitor/komari-agent/releases"
+github_release_url="${github_release_base}/${download_path}/${file_name}"
+
 if [ -n "$github_proxy" ]; then
     # Use proxy for GitHub releases
-    download_url="${github_proxy}/https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="$(join_proxy_url "$github_proxy" "$github_release_url")"
 else
     # Direct access to GitHub releases
-    download_url="https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="$github_release_url"
 fi
 
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
