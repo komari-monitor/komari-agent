@@ -1,3 +1,5 @@
+// 兼容层（Phase 5 政策）：v1 协议回退逻辑，仅用于连接不支持 v2 的
+// 旧 server。冻结，不新增功能；新 server 永远支持 v2。
 package server
 
 import (

@@ -1,107 +1,39 @@
+// Package v2 re-exports the shared JSON-RPC 2.0 wire contract.
+//
+// The wire types live in the komari-protocol module (guarded there by freeze
+// tests); this shell keeps existing import paths stable. Payload builders
+// live in builders.go.
 package v2
 
-import (
-	"encoding/json"
-	"time"
-
-	v1 "github.com/komari-monitor/komari-agent/protocol/v1"
-)
+import protocolv2 "github.com/komari-monitor/komari-protocol/protocol/v2"
 
 const (
-	Version               = "2.0"
-	MethodAgentReport     = "agent.report"
-	MethodAgentBasicInfo  = "agent.basicInfo"
-	MethodAgentPingResult = "agent.pingResult"
-	MethodAgentTaskResult = "agent.taskResult"
-	MethodAgentExec       = "agent.exec"
-	MethodAgentPing       = "agent.ping"
-	MethodAgentMessage    = "agent.message"
-	MethodAgentEvent      = "agent.event"
-	MethodAgentTerminal   = "agent.terminal.request"
-	MethodAgentPull       = "agent.pull"
+	Version               = protocolv2.Version
+	MethodAgentReport     = protocolv2.MethodAgentReport
+	MethodAgentBasicInfo  = protocolv2.MethodAgentBasicInfo
+	MethodAgentPingResult = protocolv2.MethodAgentPingResult
+	MethodAgentTaskResult = protocolv2.MethodAgentTaskResult
+	MethodAgentExec       = protocolv2.MethodAgentExec
+	MethodAgentPing       = protocolv2.MethodAgentPing
+	MethodAgentMessage    = protocolv2.MethodAgentMessage
+	MethodAgentEvent      = protocolv2.MethodAgentEvent
+	MethodAgentTerminal   = protocolv2.MethodAgentTerminal
+	MethodAgentPull       = protocolv2.MethodAgentPull
 )
 
-type Request struct {
-	JSONRPC string      `json:"jsonrpc"`
-	Method  string      `json:"method"`
-	Params  interface{} `json:"params,omitempty"`
-	ID      interface{} `json:"id,omitempty"`
-}
-
-type Response struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id,omitempty"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   *RPCError   `json:"error,omitempty"`
-}
-
-type RPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-}
-
-type Event struct {
-	ID        string      `json:"id"`
-	Method    string      `json:"method"`
-	Params    interface{} `json:"params,omitempty"`
-	CreatedAt string      `json:"created_at,omitempty"`
-	ExpiresAt string      `json:"expires_at,omitempty"`
-}
-
-type EventResult struct {
-	Status string  `json:"status,omitempty"`
-	Events []Event `json:"events,omitempty"`
-}
-
-func NewNotification(method string, params interface{}) []byte {
-	payload, _ := json.Marshal(Request{JSONRPC: Version, Method: method, Params: params})
-	return payload
-}
-
-func NewRequest(id interface{}, method string, params interface{}) []byte {
-	payload, _ := json.Marshal(Request{JSONRPC: Version, Method: method, Params: params, ID: id})
-	return payload
-}
-
-func BuildReportPayload(report v1.ReportPayload) []byte {
-	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report)})
-}
-
-func BuildReportRequest(id interface{}, report v1.ReportPayload, ackEventIDs []string) []byte {
-	return NewRequest(id, MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
-}
-
-func BuildBasicInfoPayload(info map[string]interface{}) []byte {
-	return NewNotification(MethodAgentBasicInfo, map[string]interface{}{"info": info})
-}
-
-type reportParams struct {
-	Report      json.RawMessage `json:"report"`
-	AckEventIDs []string        `json:"ack_event_ids,omitempty"`
-}
-
-func BuildPingResultPayload(taskID uint, pingType string, value int, finishedAt time.Time) interface{} {
-	return Request{
-		JSONRPC: Version,
-		Method:  MethodAgentPingResult,
-		Params: map[string]interface{}{
-			"task_id":     taskID,
-			"ping_type":   pingType,
-			"value":       value,
-			"finished_at": finishedAt.Format(time.RFC3339Nano),
-		},
-	}
-}
-
-func BindParams(raw interface{}, target interface{}) error {
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(b, target)
-}
-
-func BindResult(raw interface{}, target interface{}) error {
-	return BindParams(raw, target)
-}
+type (
+	Request               = protocolv2.Request
+	Response              = protocolv2.Response
+	RPCError              = protocolv2.RPCError
+	Event                 = protocolv2.Event
+	EventResult           = protocolv2.EventResult
+	ReportParams          = protocolv2.ReportParams
+	BasicInfoParams       = protocolv2.BasicInfoParams
+	PingResultParams      = protocolv2.PingResultParams
+	PullParams            = protocolv2.PullParams
+	ExecParams            = protocolv2.ExecParams
+	PingParams            = protocolv2.PingParams
+	MessageParams         = protocolv2.MessageParams
+	EventParams           = protocolv2.EventParams
+	TerminalRequestParams = protocolv2.TerminalRequestParams
+)

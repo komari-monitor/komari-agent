@@ -2,6 +2,12 @@ module github.com/komari-monitor/komari-agent
 
 go 1.24.0
 
+// komari-protocol 尚未发布 tag，开发期用目录 replace（CI 中作为 sibling
+// checkout，与本地布局一致）；首个 tag 发布后改为 go get 升级并删除 replace。
+require github.com/komari-monitor/komari-protocol v0.0.0
+
+replace github.com/komari-monitor/komari-protocol => ../komari-protocol
+
 require (
 	github.com/UserExistsError/conpty v0.1.4
 	github.com/blang/semver v3.5.1+incompatible

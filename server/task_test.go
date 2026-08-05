@@ -1,9 +1,19 @@
 package server
 
 import (
+	"os"
 	"testing"
 	"time"
 )
+
+// requireLiveNetwork skips tests that ping real external hosts unless
+// KOMARI_AGENT_LIVE_NETWORK_TESTS=1 is set. They depend on external
+// reachability (and ICMP privileges) and are not suitable for CI.
+func requireLiveNetwork(t *testing.T) {
+	if os.Getenv("KOMARI_AGENT_LIVE_NETWORK_TESTS") == "" {
+		t.Skip("live network test; set KOMARI_AGENT_LIVE_NETWORK_TESTS=1 to run")
+	}
+}
 
 var testTargets = []struct {
 	target string
@@ -18,6 +28,7 @@ var testTargets = []struct {
 }
 
 func TestICMPPing(t *testing.T) {
+	requireLiveNetwork(t)
 	timeout := 3 * time.Second
 	for _, tt := range testTargets {
 		t.Run(tt.target, func(t *testing.T) {
@@ -33,6 +44,7 @@ func TestICMPPing(t *testing.T) {
 }
 
 func TestTCPPing(t *testing.T) {
+	requireLiveNetwork(t)
 	timeout := 3 * time.Second
 	for _, tt := range testTargets {
 		t.Run(tt.target, func(t *testing.T) {
@@ -48,6 +60,7 @@ func TestTCPPing(t *testing.T) {
 }
 
 func TestHTTPPing(t *testing.T) {
+	requireLiveNetwork(t)
 	timeout := 3 * time.Second
 	for _, tt := range testTargets {
 		t.Run(tt.target, func(t *testing.T) {

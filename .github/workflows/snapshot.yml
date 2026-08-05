@@ -81,6 +81,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout protocol repo as sibling (go.mod replace target)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/komari-protocol
+          path: komari-protocol
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -179,6 +185,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Checkout protocol repo as sibling (go.mod replace target)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/komari-protocol
+          path: komari-protocol
 
       - name: Ensure commit is still current main
         run: |
