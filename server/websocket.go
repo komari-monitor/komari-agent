@@ -486,7 +486,7 @@ func establishTerminalConnection(token, id, endpoint string) {
 	}
 
 	// 启动终端
-	terminal.StartTerminal(conn)
+	terminal.StartTerminal(conn, id)
 	if conn != nil {
 		conn.Close()
 	}
