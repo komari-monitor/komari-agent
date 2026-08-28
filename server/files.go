@@ -3,7 +3,9 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,10 +34,11 @@ import (
 )
 
 const (
-	maxEditableFileSize = int64(4 * 1024 * 1024)
-	fileChunkSize       = int64(2 * 1024 * 1024)
-	maxDecodedChunk     = int64(128 * 1024 * 1024)
-	searchResultLimit   = 500
+	maxEditableFileSize  = int64(4 * 1024 * 1024)
+	fileChunkSize        = int64(2 * 1024 * 1024)
+	maxTransferChunkSize = int64(128 * 1024 * 1024)
+	searchResultLimit    = 500
+	downloadSessionTTL   = 15 * time.Minute
 )
 
 type fileInfo struct {
@@ -65,9 +68,19 @@ type uploadChunkState struct {
 	CreatedAt    time.Time
 }
 
+type downloadSessionState struct {
+	Path      string
+	Offset    int64
+	Size      int64
+	ChunkSize int64
+	CreatedAt time.Time
+}
+
 var (
-	uploadChunksMu sync.Mutex
-	uploadChunks   = make(map[string]uploadChunkState)
+	uploadChunksMu     sync.Mutex
+	uploadChunks       = make(map[string]uploadChunkState)
+	downloadSessionsMu sync.Mutex
+	downloadSessions   = make(map[string]downloadSessionState)
 )
 
 type searchMatch struct {
@@ -133,6 +146,12 @@ func executeFileOperation(operation v2.FileOperation) (json.RawMessage, error) {
 		return searchFiles(operation.Args)
 	case "read_chunk":
 		return readFileChunk(operation.Args)
+	case "download_init":
+		return initFileDownload(operation.Args)
+	case "download_chunk":
+		return readFileDownloadChunk(operation.Args)
+	case "download_finish", "download_cancel":
+		return finishFileDownload(operation.Args)
 	case "upload_chunk":
 		return writeFileChunk(operation.Args, operation.Data)
 	case "upload_cancel":
@@ -730,6 +749,122 @@ func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	}
 	return json.Marshal(map[string]any{"cancelled": true})
 }
+func initFileDownload(args map[string]interface{}) (json.RawMessage, error) {
+	path := resolveFilePath(argString(args, "path"))
+	offset := argInt64(args, "offset")
+	size := argInt64(args, "size")
+	chunkSize := argInt64(args, "chunk_size")
+	if offset < 0 || size < 0 {
+		return nil, errors.New("download offset and size must not be negative")
+	}
+	if chunkSize == 0 {
+		chunkSize = fileChunkSize
+	}
+	if chunkSize <= 0 || chunkSize > maxTransferChunkSize {
+		return nil, fmt.Errorf("chunk_size must be between 1 and %d bytes", maxTransferChunkSize)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, errors.New("cannot download a directory")
+	}
+	if offset > info.Size() || size > info.Size()-offset {
+		return nil, errors.New("download range exceeds file size")
+	}
+
+	id := newFileTransferID()
+	now := time.Now()
+	downloadSessionsMu.Lock()
+	for sessionID, session := range downloadSessions {
+		if now.Sub(session.CreatedAt) > downloadSessionTTL {
+			delete(downloadSessions, sessionID)
+		}
+	}
+	downloadSessions[id] = downloadSessionState{
+		Path:      path,
+		Offset:    offset,
+		Size:      size,
+		ChunkSize: chunkSize,
+		CreatedAt: now,
+	}
+	downloadSessionsMu.Unlock()
+
+	return json.Marshal(map[string]any{
+		"download_id": id,
+		"offset":      offset,
+		"size":        size,
+		"chunk_size":  chunkSize,
+		"chunk_count": uploadChunkCount(size, chunkSize),
+		"name":        info.Name(),
+		"modified_at": info.ModTime().UTC(),
+	})
+}
+
+func readFileDownloadChunk(args map[string]interface{}) (json.RawMessage, error) {
+	id := strings.TrimSpace(argString(args, "download_id"))
+	index := argInt64(args, "chunk_index")
+	if id == "" {
+		return nil, errors.New("download_id is required")
+	}
+	if index < 0 {
+		return nil, errors.New("download chunk index must not be negative")
+	}
+	downloadSessionsMu.Lock()
+	session, ok := downloadSessions[id]
+	downloadSessionsMu.Unlock()
+	if !ok {
+		return nil, errors.New("unknown download session")
+	}
+	offset := argInt64(args, "offset")
+	length := argInt64(args, "length")
+	if length == 0 {
+		chunkCount := uploadChunkCount(session.Size, session.ChunkSize)
+		if index < 0 || index >= chunkCount {
+			return nil, errors.New("invalid download chunk index")
+		}
+		offset = session.Offset + index*session.ChunkSize
+		length = min(session.ChunkSize, session.Size-index*session.ChunkSize)
+	}
+	if offset < session.Offset || length <= 0 || length > maxTransferChunkSize || offset > session.Offset+session.Size || length > session.Offset+session.Size-offset {
+		return nil, errors.New("download range is invalid")
+	}
+	content, read, err := readFileBytes(session.Path, offset, length)
+	if err != nil {
+		return nil, err
+	}
+	if read != length {
+		return nil, errors.New("download file changed while reading")
+	}
+	return json.Marshal(map[string]any{
+		"data":        base64.StdEncoding.EncodeToString(content),
+		"offset":      offset,
+		"read":        read,
+		"chunk_index": index,
+		"eof":         offset+read >= session.Offset+session.Size,
+	})
+}
+
+func finishFileDownload(args map[string]interface{}) (json.RawMessage, error) {
+	id := strings.TrimSpace(argString(args, "download_id"))
+	if id == "" {
+		return nil, errors.New("download_id is required")
+	}
+	downloadSessionsMu.Lock()
+	delete(downloadSessions, id)
+	downloadSessionsMu.Unlock()
+	return json.Marshal(map[string]any{"finished": true})
+}
+
+func newFileTransferID() string {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err == nil {
+		return hex.EncodeToString(id[:])
+	}
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
 func readFileChunk(args map[string]interface{}) (json.RawMessage, error) {
 	path := resolveFilePath(argString(args, "path"))
 	offset := argInt64(args, "offset")
@@ -737,22 +872,10 @@ func readFileChunk(args map[string]interface{}) (json.RawMessage, error) {
 	if offset < 0 {
 		return nil, errors.New("read offset must not be negative")
 	}
-	if length <= 0 || length > fileChunkSize {
-		return nil, fmt.Errorf("read length must be between 1 and %d bytes", fileChunkSize)
+	if length <= 0 {
+		return nil, errors.New("read length must be positive")
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	if _, err = file.Seek(offset, io.SeekStart); err != nil {
-		return nil, err
-	}
-	content := make([]byte, length)
-	read, err := io.ReadFull(file, content)
-	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-		err = nil
-	}
+	content, read, err := readFileBytes(path, offset, length)
 	if err != nil {
 		return nil, err
 	}
@@ -760,8 +883,28 @@ func readFileChunk(args map[string]interface{}) (json.RawMessage, error) {
 		"data":   base64.StdEncoding.EncodeToString(content[:read]),
 		"offset": offset,
 		"read":   read,
-		"eof":    read < int(length),
+		"eof":    read < length,
 	})
+}
+
+func readFileBytes(path string, offset, length int64) ([]byte, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer file.Close()
+	if _, err = file.Seek(offset, io.SeekStart); err != nil {
+		return nil, 0, err
+	}
+	content := make([]byte, length)
+	read, err := io.ReadFull(file, content)
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return content[:read], int64(read), nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	return content, int64(read), nil
 }
 
 func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessage, error) {
@@ -794,8 +937,8 @@ func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessag
 	if chunkCount <= 0 || totalSize <= 0 {
 		return nil, errors.New("chunk_count and total_size are required")
 	}
-	if chunkSize <= 0 || chunkSize > maxDecodedChunk {
-		return nil, fmt.Errorf("chunk_size must be between 1 and %d bytes", maxDecodedChunk)
+	if chunkSize <= 0 || chunkSize > maxTransferChunkSize {
+		return nil, fmt.Errorf("chunk_size must be between 1 and %d bytes", maxTransferChunkSize)
 	}
 	expectedChunkCount := (totalSize + chunkSize - 1) / chunkSize
 	if chunkCount != expectedChunkCount {
@@ -817,8 +960,8 @@ func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessag
 		if expectedSize <= 0 || int64(len(content)) != expectedSize {
 			return nil, fmt.Errorf("chunk %d has size %d, want %d", chunkIndex, len(content), expectedSize)
 		}
-		if int64(len(content)) > maxDecodedChunk {
-			return nil, fmt.Errorf("chunk exceeds %d bytes", maxDecodedChunk)
+		if int64(len(content)) > maxTransferChunkSize {
+			return nil, fmt.Errorf("chunk exceeds %d bytes", maxTransferChunkSize)
 		}
 	}
 	uploadChunksMu.Lock()

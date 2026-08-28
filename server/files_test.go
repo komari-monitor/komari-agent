@@ -264,6 +264,106 @@ func TestFileChunkUploadAndDownload(t *testing.T) {
 	}
 }
 
+func TestFileChunkDownloadAcceptsWebTransferChunkSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large-read.bin")
+	content := bytes.Repeat([]byte("k"), 6*1024*1024)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	chunk := mustRunFileOperation(t, v2.FileOperation{
+		Op: "read_chunk",
+		Args: map[string]interface{}{
+			"path":   path,
+			"offset": float64(0),
+			"length": float64(6 * 1024 * 1024),
+		},
+	})
+	var result struct {
+		Data string `json:"data"`
+		Read int    `json:"read"`
+	}
+	if err := json.Unmarshal(chunk, &result); err != nil {
+		t.Fatalf("decode chunk result: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(result.Data)
+	if err != nil {
+		t.Fatalf("decode chunk data: %v", err)
+	}
+	if result.Read != len(content) || !bytes.Equal(decoded, content) {
+		t.Fatalf("unexpected 6MB chunk: read=%d bytes=%d", result.Read, len(decoded))
+	}
+}
+
+func TestFileDownloadSessionRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "download-session.bin")
+	content := bytes.Repeat([]byte("d"), 6*1024*1024+123)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := int64(17)
+	size := int64(len(content) - 31)
+	chunkSize := int64(6 * 1024 * 1024)
+	initRaw := mustRunFileOperation(t, v2.FileOperation{
+		Op: "download_init",
+		Args: map[string]interface{}{
+			"path":       path,
+			"offset":     float64(start),
+			"size":       float64(size),
+			"chunk_size": float64(chunkSize),
+		},
+	})
+	var session struct {
+		DownloadID string `json:"download_id"`
+		ChunkCount int64  `json:"chunk_count"`
+	}
+	if err := json.Unmarshal(initRaw, &session); err != nil {
+		t.Fatalf("decode download session: %v", err)
+	}
+	if session.DownloadID == "" || session.ChunkCount != 2 {
+		t.Fatalf("unexpected download session: %+v", session)
+	}
+
+	var downloaded []byte
+	for index := int64(0); index < session.ChunkCount; index++ {
+		requestedOffset := start + int64(len(downloaded))
+		requestedLength := min(chunkSize, size-int64(len(downloaded)))
+		chunkRaw := mustRunFileOperation(t, v2.FileOperation{
+			Op: "download_chunk",
+			Args: map[string]interface{}{
+				"download_id": session.DownloadID,
+				"chunk_index": index,
+				"offset":      float64(requestedOffset),
+				"length":      float64(requestedLength),
+			},
+		})
+		var chunk struct {
+			Data   string `json:"data"`
+			Offset int64  `json:"offset"`
+			Read   int64  `json:"read"`
+		}
+		if err := json.Unmarshal(chunkRaw, &chunk); err != nil {
+			t.Fatalf("decode download chunk: %v", err)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(chunk.Data)
+		if err != nil {
+			t.Fatalf("decode download data: %v", err)
+		}
+		if chunk.Offset != start+int64(len(downloaded)) || chunk.Read != int64(len(decoded)) {
+			t.Fatalf("unexpected download chunk metadata: %+v", chunk)
+		}
+		downloaded = append(downloaded, decoded...)
+	}
+	if want := content[start : start+size]; !bytes.Equal(downloaded, want) {
+		t.Fatal("downloaded session data does not match requested range")
+	}
+	mustRunFileOperation(t, v2.FileOperation{
+		Op:   "download_finish",
+		Args: map[string]interface{}{"download_id": session.DownloadID},
+	})
+}
+
 func TestFileChunkUploadResume(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "resume-target.txt")
