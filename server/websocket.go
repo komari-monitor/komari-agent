@@ -26,7 +26,12 @@ import (
 var (
 	v2AckMu       sync.Mutex
 	v2AckEventIDs []string
-	v2SeenEvents  = make(map[string]struct{})
+	v2SeenEvents  = make(map[string]time.Time)
+)
+
+const (
+	v2SeenEventTTL   = 10 * time.Minute
+	v2SeenEventLimit = 4096
 )
 
 func EstablishWebSocketConnection() {
@@ -40,8 +45,12 @@ func EstablishWebSocketConnection() {
 	var err error
 	interval := math.Max(1, flags.Interval)
 
-	dataTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
+	// Connection recovery must not wait for the (possibly much longer) report
+	// interval. Poll the connection frequently and gate reports separately.
+	dataTicker := time.NewTicker(time.Second)
 	defer dataTicker.Stop()
+	reportInterval := time.Duration(interval * float64(time.Second))
+	nextReportAt := time.Now()
 
 	heartbeatTicker := time.NewTicker(30 * time.Second)
 	defer heartbeatTicker.Stop()
@@ -109,6 +118,10 @@ func EstablishWebSocketConnection() {
 					go handleWebSocketMessages(conn, activeProtocol, done)
 				}
 			}
+			if conn == nil || time.Now().Before(nextReportAt) {
+				continue
+			}
+			nextReportAt = time.Now().Add(reportInterval)
 
 			data := monitoring.GenerateReport()
 			if activeProtocol >= 2 {
@@ -223,7 +236,7 @@ func runV2PullLoop(ctx context.Context, errCh chan<- error) {
 		pullID := fmt.Sprintf("pull-%d", time.Now().UnixNano())
 		ackIDs := snapshotV2AckEventIDs()
 		payload := v2.NewRequest(pullID, v2.MethodAgentPull, map[string]interface{}{
-			"capabilities":  []string{"exec", "ping", "message", "event", "terminal"},
+			"capabilities":  []string{"exec", "ping", "message", "event", "terminal", "file"},
 			"ack_event_ids": ackIDs,
 		})
 		resp, err := postV2RequestContext(ctx, payload)
@@ -346,10 +359,28 @@ func markV2EventSeen(id string) bool {
 	}
 	v2AckMu.Lock()
 	defer v2AckMu.Unlock()
+	now := time.Now()
+	for eventID, seenAt := range v2SeenEvents {
+		if now.Sub(seenAt) > v2SeenEventTTL {
+			delete(v2SeenEvents, eventID)
+		}
+	}
 	if _, ok := v2SeenEvents[id]; ok {
 		return false
 	}
-	v2SeenEvents[id] = struct{}{}
+	if len(v2SeenEvents) >= v2SeenEventLimit {
+		var oldestID string
+		var oldest time.Time
+		for eventID, seenAt := range v2SeenEvents {
+			if oldestID == "" || seenAt.Before(oldest) {
+				oldestID, oldest = eventID, seenAt
+			}
+		}
+		if oldestID != "" {
+			delete(v2SeenEvents, oldestID)
+		}
+	}
+	v2SeenEvents[id] = now
 	return true
 }
 
@@ -456,6 +487,14 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
 		log.Printf("received v2 %s: %+v", method, params)
 		return true
+	case v2.MethodAgentFile:
+		var operation v2.FileOperation
+		if err := v2.BindParams(params, &operation); err == nil {
+			go handleFileOperation(operation)
+			return true
+		} else {
+			log.Printf("bad v2 file params: %v", err)
+		}
 	default:
 		log.Printf("unknown v2 event method %s", method)
 	}

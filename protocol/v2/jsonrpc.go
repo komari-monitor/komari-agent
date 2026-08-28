@@ -19,6 +19,8 @@ const (
 	MethodAgentEvent      = "agent.event"
 	MethodAgentTerminal   = "agent.terminal.request"
 	MethodAgentPull       = "agent.pull"
+	MethodAgentFile       = "agent.file"
+	MethodAgentFileResult = "agent.file.result"
 )
 
 type Request struct {
@@ -45,13 +47,29 @@ type Event struct {
 	ID        string      `json:"id"`
 	Method    string      `json:"method"`
 	Params    interface{} `json:"params,omitempty"`
-	CreatedAt string      `json:"created_at,omitempty"`
-	ExpiresAt string      `json:"expires_at,omitempty"`
+	CreatedAt time.Time   `json:"created_at"`
+	ExpiresAt time.Time   `json:"expires_at"`
 }
 
 type EventResult struct {
 	Status string  `json:"status,omitempty"`
 	Events []Event `json:"events,omitempty"`
+}
+
+type FileOperation struct {
+	UUID      string                 `json:"uuid"`
+	RequestID string                 `json:"request_id"`
+	Op        string                 `json:"op"`
+	Args      map[string]interface{} `json:"args,omitempty"`
+	Data      string                 `json:"data,omitempty"`
+}
+
+type FileResult struct {
+	UUID      string          `json:"uuid"`
+	RequestID string          `json:"request_id"`
+	OK        bool            `json:"ok"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     string          `json:"error,omitempty"`
 }
 
 func NewNotification(method string, params interface{}) []byte {

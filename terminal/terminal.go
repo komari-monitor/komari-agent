@@ -13,7 +13,8 @@ import (
 
 var flags = pkg_flags.GlobalConfig
 
-const disconnectedRetention = 30 * time.Second
+// 与 Server 端会话保留窗口对齐，网络恢复后同一会话可重新附着。
+const disconnectedRetention = 5 * time.Minute
 
 // Terminal 接口定义平台特定的终端操作
 type Terminal interface {
