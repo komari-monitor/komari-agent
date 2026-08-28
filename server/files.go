@@ -34,7 +34,7 @@ import (
 const (
 	maxEditableFileSize = int64(4 * 1024 * 1024)
 	fileChunkSize       = int64(2 * 1024 * 1024)
-	maxDecodedChunk     = int64(3 * 1024 * 1024)
+	maxDecodedChunk     = int64(128 * 1024 * 1024)
 	searchResultLimit   = 500
 )
 
@@ -57,6 +57,7 @@ type fileInfo struct {
 type uploadChunkState struct {
 	Size         int64
 	ExpectedSize int64
+	ChunkSize    int64
 	TargetPath   string
 	Parts        map[int64]struct{}
 	PartCount    int64
@@ -682,7 +683,11 @@ func writeUploadChunkLocked(uploadID, targetPath string, offset int64, content [
 	if state.Parts == nil {
 		state.Parts = make(map[int64]struct{})
 	}
-	state.Parts[offset/fileChunkSize] = struct{}{}
+	chunkSize := state.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = fileChunkSize
+	}
+	state.Parts[offset/chunkSize] = struct{}{}
 	state.TempPath = partPath
 	state.CreatedAt = time.Now()
 	uploadChunks[uploadID] = state
@@ -769,6 +774,10 @@ func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessag
 	chunkIndex := argInt64(args, "chunk_index")
 	chunkCount := argInt64(args, "chunk_count")
 	totalSize := argInt64(args, "total_size")
+	chunkSize := argInt64(args, "chunk_size")
+	if chunkSize == 0 {
+		chunkSize = fileChunkSize
+	}
 	content, err := decodeData(encoded)
 	if err != nil {
 		return nil, err
@@ -785,7 +794,10 @@ func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessag
 	if chunkCount <= 0 || totalSize <= 0 {
 		return nil, errors.New("chunk_count and total_size are required")
 	}
-	expectedChunkCount := (totalSize + fileChunkSize - 1) / fileChunkSize
+	if chunkSize <= 0 || chunkSize > maxDecodedChunk {
+		return nil, fmt.Errorf("chunk_size must be between 1 and %d bytes", maxDecodedChunk)
+	}
+	expectedChunkCount := (totalSize + chunkSize - 1) / chunkSize
 	if chunkCount != expectedChunkCount {
 		return nil, fmt.Errorf("chunk_count %d does not match total_size %d", chunkCount, totalSize)
 	}
@@ -798,10 +810,10 @@ func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessag
 			return nil, errors.New("invalid final upload marker")
 		}
 	} else {
-		if chunkIndex >= chunkCount || offset != chunkIndex*fileChunkSize {
+		if chunkIndex >= chunkCount || offset != chunkIndex*chunkSize {
 			return nil, fmt.Errorf("chunk %d has an invalid offset", chunkIndex)
 		}
-		expectedSize := min(fileChunkSize, totalSize-offset)
+		expectedSize := min(chunkSize, totalSize-offset)
 		if expectedSize <= 0 || int64(len(content)) != expectedSize {
 			return nil, fmt.Errorf("chunk %d has size %d, want %d", chunkIndex, len(content), expectedSize)
 		}
@@ -823,6 +835,7 @@ func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessag
 		}
 		state = uploadChunkState{
 			ExpectedSize: totalSize,
+			ChunkSize:    chunkSize,
 			TargetPath:   targetPath,
 			PartCount:    chunkCount,
 			Parts:        make(map[int64]struct{}),
@@ -838,10 +851,14 @@ func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessag
 	if state.ExpectedSize != 0 && state.ExpectedSize != totalSize {
 		return nil, errors.New("upload total size does not match session")
 	}
+	if state.ChunkSize != 0 && state.ChunkSize != chunkSize {
+		return nil, errors.New("upload chunk size does not match session")
+	}
 	if state.PartCount != 0 && state.PartCount != chunkCount {
 		return nil, errors.New("upload chunk count does not match session")
 	}
 	state.ExpectedSize = totalSize
+	state.ChunkSize = chunkSize
 	state.PartCount = chunkCount
 	if state.Parts == nil {
 		state.Parts = make(map[int64]struct{})

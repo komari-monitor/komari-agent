@@ -336,6 +336,49 @@ func TestFileChunkUploadResume(t *testing.T) {
 	}
 }
 
+func TestFileChunkUploadCustomChunkSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom-chunk.bin")
+	content := []byte("custom chunk size")
+	chunkSize := int64(6 * 1024 * 1024)
+	chunkCount := uploadChunkCount(int64(len(content)), chunkSize)
+
+	mustRunFileOperation(t, v2.FileOperation{
+		Op: "upload_chunk",
+		Args: map[string]interface{}{
+			"path":        path,
+			"offset":      float64(0),
+			"chunk_index": float64(0),
+			"chunk_count": float64(chunkCount),
+			"chunk_size":  float64(chunkSize),
+			"total_size":  float64(len(content)),
+			"upload_id":   "custom-chunk-upload",
+			"first":       true,
+		},
+		Data: base64.StdEncoding.EncodeToString(content),
+	})
+	mustRunFileOperation(t, v2.FileOperation{
+		Op: "upload_chunk",
+		Args: map[string]interface{}{
+			"path":        path,
+			"offset":      float64(len(content)),
+			"chunk_index": float64(chunkCount),
+			"chunk_count": float64(chunkCount),
+			"chunk_size":  float64(chunkSize),
+			"total_size":  float64(len(content)),
+			"upload_id":   "custom-chunk-upload",
+			"final":       true,
+		},
+	})
+
+	result, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read custom chunk upload: %v", err)
+	}
+	if !bytes.Equal(result, content) {
+		t.Fatalf("custom chunk content = %q, want %q", result, content)
+	}
+}
+
 func TestFileChunkUploadCancelRemovesPart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cancel.bin")
 	uploadID := "cancel-upload"
