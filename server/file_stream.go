@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	fileStreamHTTPTimeout   = 30 * time.Minute
-	fileStreamBufferSize    = 512 * 1024
-	maxFileStreamOperations = 8
+	fileStreamHTTPTimeout    = 30 * time.Minute
+	fileStreamBufferSize     = 512 * 1024
+	maxFileStreamOperations  = 8
+	uploadCancelTombstoneTTL = 15 * time.Minute
 )
 
 var (
@@ -34,10 +35,11 @@ var (
 )
 
 type uploadStreamLifecycle struct {
-	active   int
-	idle     chan struct{}
-	canceled bool
-	streams  map[string]context.CancelFunc
+	active     int
+	idle       chan struct{}
+	canceled   bool
+	canceledAt time.Time
+	streams    map[string]context.CancelFunc
 }
 
 type uploadStreamSpec struct {
@@ -224,6 +226,7 @@ func beginUploadStream(uploadID, streamID string, cancel context.CancelFunc) (fu
 		return func() {}, nil
 	}
 	uploadLifecycleMu.Lock()
+	pruneUploadLifecyclesLocked(time.Now())
 	state := uploadLifecycles[uploadID]
 	if state == nil {
 		state = &uploadStreamLifecycle{
@@ -278,7 +281,7 @@ func waitUploadStreams(uploadID string) {
 		uploadLifecycleMu.Lock()
 		state := uploadLifecycles[uploadID]
 		if state == nil || state.active == 0 {
-			if state != nil {
+			if state != nil && !state.canceled {
 				delete(uploadLifecycles, uploadID)
 			}
 			uploadLifecycleMu.Unlock()
@@ -295,6 +298,7 @@ func cancelUploadStreams(uploadID string) {
 		return
 	}
 	uploadLifecycleMu.Lock()
+	pruneUploadLifecyclesLocked(time.Now())
 	state := uploadLifecycles[uploadID]
 	if state == nil {
 		state = &uploadStreamLifecycle{
@@ -305,6 +309,7 @@ func cancelUploadStreams(uploadID string) {
 		uploadLifecycles[uploadID] = state
 	}
 	state.canceled = true
+	state.canceledAt = time.Now()
 	cancellations := make([]context.CancelFunc, 0, len(state.streams))
 	for _, cancel := range state.streams {
 		cancellations = append(cancellations, cancel)
@@ -312,6 +317,17 @@ func cancelUploadStreams(uploadID string) {
 	uploadLifecycleMu.Unlock()
 	for _, cancel := range cancellations {
 		cancel()
+	}
+}
+
+func pruneUploadLifecyclesLocked(now time.Time) {
+	for uploadID, state := range uploadLifecycles {
+		if state == nil || !state.canceled || state.active != 0 {
+			continue
+		}
+		if state.canceledAt.IsZero() || now.Sub(state.canceledAt) >= uploadCancelTombstoneTTL {
+			delete(uploadLifecycles, uploadID)
+		}
 	}
 }
 
@@ -327,7 +343,7 @@ func parseUploadStreamSpec(args map[string]interface{}) (uploadStreamSpec, error
 		First:      argBool(args, "first"),
 	}
 	if spec.ChunkSize == 0 {
-		spec.ChunkSize = fileChunkSize
+		spec.ChunkSize = defaultTransferChunkSize
 	}
 	if spec.UploadID == "" {
 		return uploadStreamSpec{}, errors.New("upload_id is required")
@@ -375,9 +391,6 @@ func forgetUploadWriteLock(uploadID string) {
 }
 
 func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMessage, error) {
-	lock := uploadWriteLock(spec.UploadID)
-	lock.Lock()
-	defer lock.Unlock()
 	uploadChunksMu.Lock()
 	state, exists := uploadChunks[spec.UploadID]
 	if spec.First {

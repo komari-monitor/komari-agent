@@ -243,6 +243,56 @@ func TestFirstUploadStreamRetryPreservesOtherParts(t *testing.T) {
 	}
 }
 
+func TestCommitFileUploadFinalizesRawStream(t *testing.T) {
+	resetUploadStreamState(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "committed.bin")
+	spec := uploadStreamSpec{
+		Path:       resolveFilePath(target),
+		UploadID:   "commit-upload",
+		ChunkIndex: 0,
+		ChunkCount: 2,
+		TotalSize:  8,
+		ChunkSize:  4,
+		Expected:   4,
+		First:      true,
+	}
+	if _, err := writeUploadStreamChunk(spec, bytes.NewReader([]byte("aaaa"))); err != nil {
+		t.Fatal(err)
+	}
+	second := spec
+	second.Offset = 4
+	second.ChunkIndex = 1
+	second.First = false
+	if _, err := writeUploadStreamChunk(second, bytes.NewReader([]byte("bbbb"))); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := commitFileUpload(map[string]interface{}{
+		"path":        target,
+		"upload_id":   spec.UploadID,
+		"chunk_count": int64(spec.ChunkCount),
+		"total_size":  int64(spec.TotalSize),
+		"chunk_size":  int64(spec.ChunkSize),
+	})
+	if err != nil {
+		t.Fatalf("commitFileUpload: %v", err)
+	}
+	if len(result) == 0 {
+		t.Fatal("commitFileUpload returned an empty result")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte("aaaabbbb")) {
+		t.Fatalf("committed content = %q", got)
+	}
+	if _, err := os.Stat(uploadPartPathFor(spec.Path, spec.UploadID)); !os.IsNotExist(err) {
+		t.Fatalf("part file still exists after commit: %v", err)
+	}
+}
+
 func TestCancelUploadStreamsPreventsLateStreamRegistration(t *testing.T) {
 	resetUploadStreamState(t)
 	cancelUploadStreams("cancel-before-start")

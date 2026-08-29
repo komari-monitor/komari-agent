@@ -3,9 +3,6 @@ package server
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,23 +19,16 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
-	"golang.org/x/text/encoding"
-	"golang.org/x/text/encoding/simplifiedchinese"
-	"golang.org/x/text/encoding/traditionalchinese"
 )
 
 const (
-	maxEditableFileSize  = int64(4 * 1024 * 1024)
-	fileChunkSize        = int64(2 * 1024 * 1024)
-	maxTransferChunkSize = int64(128 * 1024 * 1024)
-	searchResultLimit    = 500
-	downloadSessionTTL   = 15 * time.Minute
+	defaultTransferChunkSize = int64(25 * 1024 * 1024)
+	maxTransferChunkSize     = int64(128 * 1024 * 1024)
+	searchResultLimit        = 500
 )
 
 type fileInfo struct {
@@ -68,19 +58,9 @@ type uploadChunkState struct {
 	CreatedAt    time.Time
 }
 
-type downloadSessionState struct {
-	Path      string
-	Offset    int64
-	Size      int64
-	ChunkSize int64
-	CreatedAt time.Time
-}
-
 var (
-	uploadChunksMu     sync.Mutex
-	uploadChunks       = make(map[string]uploadChunkState)
-	downloadSessionsMu sync.Mutex
-	downloadSessions   = make(map[string]downloadSessionState)
+	uploadChunksMu = sync.Mutex{}
+	uploadChunks   = make(map[string]uploadChunkState)
 )
 
 type searchMatch struct {
@@ -88,14 +68,6 @@ type searchMatch struct {
 	Line  int    `json:"line"`
 	Text  string `json:"text,omitempty"`
 	IsDir bool   `json:"is_dir"`
-}
-
-type fileReadResult struct {
-	Data        string    `json:"data"`
-	Size        int64     `json:"size"`
-	ModifiedAt  time.Time `json:"modified_at"`
-	ContentType string    `json:"content_type"`
-	Binary      bool      `json:"binary"`
 }
 
 func handleFileOperation(operation v2.FileOperation) {
@@ -135,10 +107,8 @@ func executeFileOperation(operation v2.FileOperation) (json.RawMessage, error) {
 		return listFilesystemRoots()
 	case "stat":
 		return statFile(argString(operation.Args, "path"))
-	case "read":
-		return readFile(argString(operation.Args, "path"))
-	case "write":
-		return writeFile(argString(operation.Args, "path"), operation.Data)
+	case "create":
+		return createFile(argString(operation.Args, "path"))
 	case "mkdir":
 		return mkdir(argString(operation.Args, "path"), argString(operation.Args, "mode"))
 	case "delete":
@@ -153,18 +123,8 @@ func executeFileOperation(operation v2.FileOperation) (json.RawMessage, error) {
 		return chownPath(operation.Args)
 	case "search":
 		return searchFiles(operation.Args)
-	case "read_chunk":
-		return readFileChunk(operation.Args)
-	case "download_init":
-		return initFileDownload(operation.Args)
-	case "download_chunk":
-		return readFileDownloadChunk(operation.Args)
-	case "download_finish", "download_cancel":
-		return finishFileDownload(operation.Args)
 	case "download_stream":
 		return sendDownloadStream(operation.Args)
-	case "upload_chunk":
-		return writeFileChunk(operation.Args, operation.Data)
 	case "upload_stream":
 		return receiveUploadStream(operation.Args)
 	case "upload_commit":
@@ -174,16 +134,6 @@ func executeFileOperation(operation v2.FileOperation) (json.RawMessage, error) {
 	default:
 		return nil, fmt.Errorf("unsupported file operation: %s", operation.Op)
 	}
-}
-
-// commitFileUpload is the control-plane-only finalization step for the raw
-// upload stream. It deliberately carries no file data.
-func commitFileUpload(args map[string]interface{}) (json.RawMessage, error) {
-	result, err := writeFileChunk(args, "")
-	if err == nil {
-		forgetUploadWriteLock(strings.TrimSpace(argString(args, "upload_id")))
-	}
-	return result, err
 }
 
 func listFiles(root string) (json.RawMessage, error) {
@@ -221,128 +171,53 @@ func statFile(path string) (json.RawMessage, error) {
 	return json.Marshal(info)
 }
 
-func readFile(path string) (json.RawMessage, error) {
+// createFile creates or truncates an empty regular file without carrying file
+// data through the RPC control channel. Non-empty replacements use the raw
+// upload stream and are finalized by upload_commit.
+func createFile(path string) (json.RawMessage, error) {
 	path = resolveFilePath(path)
-	info, err := os.Stat(path)
+	if path == string(filepath.Separator) || path == "." {
+		return nil, errors.New("file path is required")
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return nil, err
+	}
+	mode := fs.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		if info.IsDir() {
+			return nil, errors.New("cannot replace a directory with a file")
+		}
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	temporary, err := os.CreateTemp(directory, ".komari-empty-*")
 	if err != nil {
 		return nil, err
 	}
-	if info.IsDir() {
-		return nil, errors.New("cannot read a directory")
-	}
-	if info.Size() > maxEditableFileSize {
-		return nil, fmt.Errorf("file exceeds the %d byte edit limit", maxEditableFileSize)
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
+	temporaryName := temporary.Name()
+	removeTemporary := true
+	defer func() {
+		_ = temporary.Close()
+		if removeTemporary {
+			_ = os.Remove(temporaryName)
+		}
+	}()
+	if err := temporary.Chmod(mode); err != nil {
 		return nil, err
 	}
-	return json.Marshal(fileReadResult{
-		Data:        base64.StdEncoding.EncodeToString(content),
-		Size:        info.Size(),
-		ModifiedAt:  info.ModTime().UTC(),
-		ContentType: http.DetectContentType(content),
-		Binary:      isBinaryContent(content),
-	})
-}
-
-// isBinaryContent deliberately inspects the beginning of a file rather than
-// rejecting every file that contains a NUL byte. A number of useful formats
-// start with a readable header and only become binary later; the workbench can
-// still present those files as text when their prefix is unambiguously readable.
-func isBinaryContent(content []byte) bool {
-	if len(content) == 0 {
-		return false
-	}
-	sample := content
-	if len(sample) > 512 {
-		sample = sample[:512]
-	}
-	if bytes.HasPrefix(sample, []byte{0xEF, 0xBB, 0xBF}) {
-		sample = sample[3:]
-	}
-	if nul := bytes.IndexByte(sample, 0); nul >= 0 {
-		sample = sample[:nul]
-	}
-	return !looksLikeText(sample)
-}
-
-func looksLikeText(sample []byte) bool {
-	if len(sample) == 0 {
-		return false
-	}
-	if !utf8.Valid(sample) {
-		return looksLikeLegacyText(sample)
-	}
-	runes := []rune(string(sample))
-	if len(runes) == 0 {
-		return true
-	}
-	readable := 0
-	for _, value := range runes {
-		switch value {
-		case '\n', '\r', '\t', '\f':
-			readable++
-		default:
-			if unicode.IsControl(value) || !unicode.IsPrint(value) {
-				return false
-			}
-			readable++
-		}
-	}
-	return readable == len(runes)
-}
-
-func looksLikeLegacyText(sample []byte) bool {
-	for _, charset := range []encoding.Encoding{
-		simplifiedchinese.GB18030,
-		traditionalchinese.Big5,
-	} {
-		decoded, err := charset.NewDecoder().Bytes(sample)
-		if err != nil || !utf8.Valid(decoded) {
-			continue
-		}
-		if looksLikeUTF8Text(decoded) {
-			return true
-		}
-	}
-	return false
-}
-
-func looksLikeUTF8Text(sample []byte) bool {
-	if len(sample) == 0 || !utf8.Valid(sample) {
-		return false
-	}
-	runes := []rune(string(sample))
-	if len(runes) == 0 {
-		return true
-	}
-	for _, value := range runes {
-		switch value {
-		case '\n', '\r', '\t', '\f':
-			continue
-		default:
-			if unicode.IsControl(value) || !unicode.IsPrint(value) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func writeFile(path, encoded string) (json.RawMessage, error) {
-	path = resolveFilePath(path)
-	content, err := decodeData(encoded)
-	if err != nil {
+	if err := temporary.Close(); err != nil {
 		return nil, err
 	}
-	if int64(len(content)) > maxEditableFileSize {
-		return nil, fmt.Errorf("file exceeds the %d byte edit limit", maxEditableFileSize)
-	}
-	if err := atomicWrite(path, content); err != nil {
+	if err := replaceFile(temporaryName, path); err != nil {
 		return nil, err
 	}
-	return json.Marshal(map[string]any{"saved": true, "size": len(content)})
+	removeTemporary = false
+	if err := syncUploadDirectory(directory); err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"created": true, "size": 0})
 }
 
 func mkdir(path, modeValue string) (json.RawMessage, error) {
@@ -689,55 +564,6 @@ func removeUploadFileLocked(uploadID string) error {
 	return nil
 }
 
-func writeUploadChunkLocked(uploadID, targetPath string, offset int64, content []byte, truncate bool) error {
-	state := uploadChunks[uploadID]
-	partPath := state.TempPath
-	if partPath == "" {
-		partPath = uploadPartPathFor(targetPath, uploadID)
-	} else if filepath.Clean(partPath) != filepath.Clean(uploadPartPathFor(targetPath, uploadID)) {
-		partPath = uploadPartPathFor(targetPath, uploadID)
-	}
-	openFlags := os.O_WRONLY | os.O_CREATE
-	if truncate {
-		openFlags |= os.O_TRUNC
-	}
-	file, err := os.OpenFile(partPath, openFlags, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err = file.Seek(offset, io.SeekStart); err != nil {
-		file.Close()
-		return err
-	}
-	if _, err = file.Write(content); err != nil {
-		file.Close()
-		return err
-	}
-	if err = file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err = file.Close(); err != nil {
-		return err
-	}
-	state.Size = max(state.Size, offset+int64(len(content)))
-	if state.TargetPath == "" {
-		state.TargetPath = targetPath
-	}
-	if state.Parts == nil {
-		state.Parts = make(map[int64]struct{})
-	}
-	chunkSize := state.ChunkSize
-	if chunkSize <= 0 {
-		chunkSize = fileChunkSize
-	}
-	state.Parts[offset/chunkSize] = struct{}{}
-	state.TempPath = partPath
-	state.CreatedAt = time.Now()
-	uploadChunks[uploadID] = state
-	return nil
-}
-
 func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	uploadID := strings.TrimSpace(argString(args, "upload_id"))
 	if uploadID == "" {
@@ -785,313 +611,120 @@ func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	}
 	return json.Marshal(map[string]any{"cancelled": true})
 }
-func initFileDownload(args map[string]interface{}) (json.RawMessage, error) {
-	path := resolveFilePath(argString(args, "path"))
-	offset := argInt64(args, "offset")
-	size := argInt64(args, "size")
-	chunkSize := argInt64(args, "chunk_size")
-	if offset < 0 || size < 0 {
-		return nil, errors.New("download offset and size must not be negative")
-	}
-	if chunkSize == 0 {
-		chunkSize = fileChunkSize
-	}
-	if chunkSize <= 0 || chunkSize > maxTransferChunkSize {
-		return nil, fmt.Errorf("chunk_size must be between 1 and %d bytes", maxTransferChunkSize)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.IsDir() {
-		return nil, errors.New("cannot download a directory")
-	}
-	if offset > info.Size() || size > info.Size()-offset {
-		return nil, errors.New("download range exceeds file size")
-	}
 
-	id := newFileTransferID()
-	now := time.Now()
-	downloadSessionsMu.Lock()
-	for sessionID, session := range downloadSessions {
-		if now.Sub(session.CreatedAt) > downloadSessionTTL {
-			delete(downloadSessions, sessionID)
-		}
-	}
-	downloadSessions[id] = downloadSessionState{
-		Path:      path,
-		Offset:    offset,
-		Size:      size,
-		ChunkSize: chunkSize,
-		CreatedAt: now,
-	}
-	downloadSessionsMu.Unlock()
-
-	return json.Marshal(map[string]any{
-		"download_id": id,
-		"offset":      offset,
-		"size":        size,
-		"chunk_size":  chunkSize,
-		"chunk_count": uploadChunkCount(size, chunkSize),
-		"name":        info.Name(),
-		"modified_at": info.ModTime().UTC(),
-	})
-}
-
-func readFileDownloadChunk(args map[string]interface{}) (json.RawMessage, error) {
-	id := strings.TrimSpace(argString(args, "download_id"))
-	index := argInt64(args, "chunk_index")
-	if id == "" {
-		return nil, errors.New("download_id is required")
-	}
-	if index < 0 {
-		return nil, errors.New("download chunk index must not be negative")
-	}
-	downloadSessionsMu.Lock()
-	session, ok := downloadSessions[id]
-	downloadSessionsMu.Unlock()
-	if !ok {
-		return nil, errors.New("unknown download session")
-	}
-	offset := argInt64(args, "offset")
-	length := argInt64(args, "length")
-	if length == 0 {
-		chunkCount := uploadChunkCount(session.Size, session.ChunkSize)
-		if index < 0 || index >= chunkCount {
-			return nil, errors.New("invalid download chunk index")
-		}
-		offset = session.Offset + index*session.ChunkSize
-		length = min(session.ChunkSize, session.Size-index*session.ChunkSize)
-	}
-	if offset < session.Offset || length <= 0 || length > maxTransferChunkSize || offset > session.Offset+session.Size || length > session.Offset+session.Size-offset {
-		return nil, errors.New("download range is invalid")
-	}
-	content, read, err := readFileBytes(session.Path, offset, length)
-	if err != nil {
-		return nil, err
-	}
-	if read != length {
-		return nil, errors.New("download file changed while reading")
-	}
-	return json.Marshal(map[string]any{
-		"data":        base64.StdEncoding.EncodeToString(content),
-		"offset":      offset,
-		"read":        read,
-		"chunk_index": index,
-		"eof":         offset+read >= session.Offset+session.Size,
-	})
-}
-
-func finishFileDownload(args map[string]interface{}) (json.RawMessage, error) {
-	id := strings.TrimSpace(argString(args, "download_id"))
-	if id == "" {
-		return nil, errors.New("download_id is required")
-	}
-	downloadSessionsMu.Lock()
-	delete(downloadSessions, id)
-	downloadSessionsMu.Unlock()
-	return json.Marshal(map[string]any{"finished": true})
-}
-
-func newFileTransferID() string {
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err == nil {
-		return hex.EncodeToString(id[:])
-	}
-	return fmt.Sprintf("%d", time.Now().UnixNano())
-}
-
-func readFileChunk(args map[string]interface{}) (json.RawMessage, error) {
-	path := resolveFilePath(argString(args, "path"))
-	offset := argInt64(args, "offset")
-	length := argInt64(args, "length")
-	if offset < 0 {
-		return nil, errors.New("read offset must not be negative")
-	}
-	if length <= 0 {
-		return nil, errors.New("read length must be positive")
-	}
-	content, read, err := readFileBytes(path, offset, length)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(map[string]any{
-		"data":   base64.StdEncoding.EncodeToString(content[:read]),
-		"offset": offset,
-		"read":   read,
-		"eof":    read < length,
-	})
-}
-
-func readFileBytes(path string, offset, length int64) ([]byte, int64, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer file.Close()
-	if _, err = file.Seek(offset, io.SeekStart); err != nil {
-		return nil, 0, err
-	}
-	content := make([]byte, length)
-	read, err := io.ReadFull(file, content)
-	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-		return content[:read], int64(read), nil
-	}
-	if err != nil {
-		return nil, 0, err
-	}
-	return content, int64(read), nil
-}
-
-func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessage, error) {
-	path := resolveFilePath(argString(args, "path"))
-	targetPath := path
-	offset := argInt64(args, "offset")
-	first := argBool(args, "first")
-	final := argBool(args, "final")
+// commitFileUpload finalizes a set of raw HTTP upload streams. The control
+// request carries metadata only; all file bytes have already been written to
+// the private part file by upload_stream.
+func commitFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	uploadID := strings.TrimSpace(argString(args, "upload_id"))
-	chunkIndex := argInt64(args, "chunk_index")
-	chunkCount := argInt64(args, "chunk_count")
+	path := resolveFilePath(argString(args, "path"))
 	totalSize := argInt64(args, "total_size")
 	chunkSize := argInt64(args, "chunk_size")
-	if chunkSize == 0 {
-		chunkSize = fileChunkSize
-	}
-	content, err := decodeData(encoded)
-	if err != nil {
-		return nil, err
-	}
+	chunkCount := argInt64(args, "chunk_count")
 	if uploadID == "" {
 		return nil, errors.New("upload_id is required")
 	}
 	if path == string(filepath.Separator) || path == "." {
 		return nil, errors.New("upload path must be a file")
 	}
-	if offset < 0 {
-		return nil, errors.New("upload offset must not be negative")
-	}
-	if chunkCount <= 0 || totalSize <= 0 {
+	if totalSize <= 0 || chunkCount <= 0 {
 		return nil, errors.New("chunk_count and total_size are required")
+	}
+	if chunkSize == 0 {
+		chunkSize = defaultTransferChunkSize
 	}
 	if chunkSize <= 0 || chunkSize > maxTransferChunkSize {
 		return nil, fmt.Errorf("chunk_size must be between 1 and %d bytes", maxTransferChunkSize)
 	}
-	expectedChunkCount := (totalSize + chunkSize - 1) / chunkSize
+	expectedChunkCount := uploadChunkCount(totalSize, chunkSize)
 	if chunkCount != expectedChunkCount {
 		return nil, fmt.Errorf("chunk_count %d does not match total_size %d", chunkCount, totalSize)
 	}
-	if chunkIndex < 0 || chunkIndex > chunkCount {
-		return nil, fmt.Errorf("invalid upload chunk index %d", chunkIndex)
-	}
-	finalOnly := final && len(content) == 0
-	if finalOnly {
-		if chunkIndex != chunkCount || offset != totalSize {
-			return nil, errors.New("invalid final upload marker")
-		}
-	} else {
-		if chunkIndex >= chunkCount || offset != chunkIndex*chunkSize {
-			return nil, fmt.Errorf("chunk %d has an invalid offset", chunkIndex)
-		}
-		expectedSize := min(chunkSize, totalSize-offset)
-		if expectedSize <= 0 || int64(len(content)) != expectedSize {
-			return nil, fmt.Errorf("chunk %d has size %d, want %d", chunkIndex, len(content), expectedSize)
-		}
-		if int64(len(content)) > maxTransferChunkSize {
-			return nil, fmt.Errorf("chunk exceeds %d bytes", maxTransferChunkSize)
-		}
-	}
+
+	// Streams write independent offsets concurrently. Wait for every active
+	// stream before inspecting and renaming the part file.
+	waitUploadStreams(uploadID)
+	writeLock := uploadWriteLock(uploadID)
+	writeLock.Lock()
+	defer func() {
+		writeLock.Unlock()
+		forgetUploadWriteLock(uploadID)
+	}()
+
 	uploadChunksMu.Lock()
-	defer uploadChunksMu.Unlock()
 	state, exists := uploadChunks[uploadID]
-	if first {
-		if chunkIndex != 0 || offset != 0 || finalOnly {
-			return nil, errors.New("invalid first upload chunk")
-		}
-		if exists {
-			if err := removeUploadFileLocked(uploadID); err != nil {
-				return nil, err
-			}
-		}
-		state = uploadChunkState{
-			ExpectedSize: totalSize,
-			ChunkSize:    chunkSize,
-			TargetPath:   targetPath,
-			PartCount:    chunkCount,
-			Parts:        make(map[int64]struct{}),
-		}
-		uploadChunks[uploadID] = state
-		exists = true
-	} else if !exists {
+	if !exists {
+		uploadChunksMu.Unlock()
 		return nil, errors.New("unknown upload session")
 	}
-	if state.TargetPath != "" && filepath.Clean(state.TargetPath) != filepath.Clean(targetPath) {
+	if state.TargetPath != "" && !samePath(state.TargetPath, path) {
+		uploadChunksMu.Unlock()
 		return nil, errors.New("upload target path does not match session")
 	}
 	if state.ExpectedSize != 0 && state.ExpectedSize != totalSize {
+		uploadChunksMu.Unlock()
 		return nil, errors.New("upload total size does not match session")
 	}
 	if state.ChunkSize != 0 && state.ChunkSize != chunkSize {
+		uploadChunksMu.Unlock()
 		return nil, errors.New("upload chunk size does not match session")
 	}
 	if state.PartCount != 0 && state.PartCount != chunkCount {
+		uploadChunksMu.Unlock()
 		return nil, errors.New("upload chunk count does not match session")
 	}
-	state.ExpectedSize = totalSize
-	state.ChunkSize = chunkSize
-	state.PartCount = chunkCount
-	if state.Parts == nil {
-		state.Parts = make(map[int64]struct{})
+	if len(state.Parts) != int(chunkCount) {
+		received := len(state.Parts)
+		uploadChunksMu.Unlock()
+		return nil, fmt.Errorf("upload incomplete: received %d of %d chunks", received, chunkCount)
 	}
-	if !finalOnly {
-		if err := writeUploadChunkLocked(uploadID, targetPath, offset, content, first); err != nil {
-			return nil, err
-		}
-		state = uploadChunks[uploadID]
+	partPath := state.TempPath
+	uploadChunksMu.Unlock()
+	if partPath == "" {
+		return nil, errors.New("upload part file is missing")
 	}
 
-	if final {
-		if !exists {
-			return nil, errors.New("unknown upload session")
-		}
-		if len(state.Parts) != int(state.PartCount) {
-			return nil, fmt.Errorf("upload incomplete: received %d of %d chunks", len(state.Parts), state.PartCount)
-		}
-		if state.Size != state.ExpectedSize {
-			return nil, fmt.Errorf("upload size is %d, want %d", state.Size, state.ExpectedSize)
-		}
-		agentPartPath := state.TempPath
-		if agentPartPath == "" {
-			return nil, errors.New("upload part file is missing")
-		}
-		partPath := agentPartPath
-		partInfo, statErr := os.Stat(partPath)
-		if statErr != nil {
-			return nil, statErr
-		}
-		if partInfo.Size() < state.ExpectedSize {
-			return nil, fmt.Errorf("upload part file is %d bytes, want %d", partInfo.Size(), state.ExpectedSize)
-		}
-		if partInfo.Size() > state.ExpectedSize {
-			if err := os.Truncate(partPath, state.ExpectedSize); err != nil {
-				return nil, err
-			}
-		}
-		targetDir := filepath.Dir(path)
-		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			return nil, err
-		}
-		if err := os.Rename(partPath, path); err != nil {
-			return nil, err
-		}
-		if err := syncUploadDirectory(targetDir); err != nil {
-			return nil, err
-		}
-		delete(uploadChunks, uploadID)
+	partInfo, err := os.Stat(partPath)
+	if err != nil {
+		return nil, err
 	}
+	if partInfo.Size() < totalSize {
+		return nil, fmt.Errorf("upload part file is %d bytes, want %d", partInfo.Size(), totalSize)
+	}
+	if partInfo.Size() > totalSize {
+		if err := os.Truncate(partPath, totalSize); err != nil {
+			return nil, err
+		}
+	}
+	targetDir := filepath.Dir(path)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return nil, err
+	}
+	if info, statErr := os.Stat(path); statErr == nil {
+		if info.IsDir() {
+			return nil, errors.New("cannot replace a directory with a file")
+		}
+		if err := os.Chmod(partPath, info.Mode().Perm()); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(statErr) {
+		return nil, statErr
+	} else if err := os.Chmod(partPath, 0o644); err != nil {
+		return nil, err
+	}
+	if err := replaceFile(partPath, path); err != nil {
+		return nil, err
+	}
+	if err := syncUploadDirectory(targetDir); err != nil {
+		return nil, err
+	}
+	uploadChunksMu.Lock()
+	delete(uploadChunks, uploadID)
+	uploadChunksMu.Unlock()
 	return json.Marshal(map[string]any{
-		"received": len(content),
-		"final":    final,
-		"offset":   offset + int64(len(content)),
+		"received": totalSize,
+		"final":    true,
+		"offset":   totalSize,
 	})
 }
 
@@ -1172,41 +805,6 @@ func matchFileContent(path, query, lowerQuery string) (searchMatch, bool) {
 	return searchMatch{}, false
 }
 
-func atomicWrite(path string, content []byte) error {
-	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".komari-edit-*")
-	if err != nil {
-		return err
-	}
-	temporaryName := temporary.Name()
-	removeTemporary := true
-	defer func() {
-		_ = temporary.Close()
-		if removeTemporary {
-			_ = os.Remove(temporaryName)
-		}
-	}()
-	if _, err = temporary.Write(content); err != nil {
-		return err
-	}
-	if err = temporary.Chmod(0o644); err != nil {
-		return err
-	}
-	if err = temporary.Close(); err != nil {
-		return err
-	}
-	if info, err := os.Stat(path); err == nil {
-		if err = os.Chmod(temporaryName, info.Mode().Perm()); err != nil {
-			return err
-		}
-	}
-	if err = replaceFile(temporaryName, path); err != nil {
-		return err
-	}
-	removeTemporary = false
-	return nil
-}
-
 func postFileResult(result v2.FileResult) {
 	endpoint := strings.TrimSuffix(flags.Endpoint, "/") +
 		"/api/clients/v2/rpc?token=" + flags.Token
@@ -1214,7 +812,7 @@ func postFileResult(result v2.FileResult) {
 	client := dnsresolver.GetHTTPClientWithPreference(60*time.Second, flags.PreferIPVersion)
 	const maxAttempts = 4
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytesReader(body))
+		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			log.Printf("failed to create file result request: %v", err)
 			return
@@ -1346,15 +944,4 @@ func parseMode(value string) (uint32, error) {
 		return 0, fmt.Errorf("invalid octal mode: %s", value)
 	}
 	return uint32(parsed), nil
-}
-
-func decodeData(encoded string) ([]byte, error) {
-	if encoded == "" {
-		return []byte{}, nil
-	}
-	return base64.StdEncoding.DecodeString(encoded)
-}
-
-func bytesReader(value []byte) io.Reader {
-	return bytes.NewReader(value)
 }

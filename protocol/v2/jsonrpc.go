@@ -56,12 +56,13 @@ type EventResult struct {
 	Events []Event `json:"events,omitempty"`
 }
 
+// FileOperation is metadata-only. File contents travel through the dedicated
+// HTTP transfer endpoint rather than through JSON-RPC.
 type FileOperation struct {
 	UUID      string                 `json:"uuid"`
 	RequestID string                 `json:"request_id"`
 	Op        string                 `json:"op"`
 	Args      map[string]interface{} `json:"args,omitempty"`
-	Data      string                 `json:"data,omitempty"`
 }
 
 type FileResult struct {
