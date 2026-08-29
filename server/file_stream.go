@@ -28,16 +28,16 @@ var (
 	fileStreamBufferPool = sync.Pool{New: func() any { return make([]byte, fileStreamBufferSize) }}
 	uploadWriteLocksMu   sync.Mutex
 	uploadWriteLocks     = make(map[string]*sync.Mutex)
-	uploadStreamsMu      sync.Mutex
-	uploadStreams        = make(map[string]map[string]context.CancelFunc)
-	uploadActiveMu       sync.Mutex
-	uploadActive         = make(map[string]*activeUploadStreams)
+	uploadLifecycleMu    sync.Mutex
+	uploadLifecycles     = make(map[string]*uploadStreamLifecycle)
 	fileStreamSlots      = make(chan struct{}, maxFileStreamOperations)
 )
 
-type activeUploadStreams struct {
-	count int
-	idle  chan struct{}
+type uploadStreamLifecycle struct {
+	active   int
+	idle     chan struct{}
+	canceled bool
+	streams  map[string]context.CancelFunc
 }
 
 type uploadStreamSpec struct {
@@ -72,7 +72,7 @@ func buildFileTransferURL(args map[string]interface{}) (string, error) {
 }
 
 func fileStreamHTTPClient() *http.Client {
-	return dnsresolver.GetHTTPClientWithPreference(fileStreamHTTPTimeout, pkg_flags.GlobalConfig.PreferIPVersion)
+	return dnsresolver.GetHTTPClientWithoutHTTP2(fileStreamHTTPTimeout, pkg_flags.GlobalConfig.PreferIPVersion)
 }
 
 func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
@@ -80,45 +80,45 @@ func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
 	offset := argInt64(args, "offset")
 	length := argInt64(args, "length")
 	if offset < 0 || length <= 0 || length > maxTransferChunkSize {
-		return nil, errors.New("invalid download stream range")
+		return nil, fmt.Errorf("download_stream: invalid range offset=%d length=%d", offset, length)
 	}
 	transferURL, err := buildFileTransferURL(args)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("download_stream: build transfer URL: %w", err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("download_stream: stat %q: %w", path, err)
 	}
 	if info.IsDir() {
-		return nil, errors.New("cannot download a directory")
+		return nil, errors.New("download_stream: cannot download a directory")
 	}
 	if offset > info.Size() || length > info.Size()-offset {
-		return nil, errors.New("download range exceeds file size")
+		return nil, fmt.Errorf("download_stream: range offset=%d length=%d exceeds file size=%d", offset, length, info.Size())
 	}
 	if expectedSize := argInt64(args, "file_size"); expectedSize > 0 && info.Size() != expectedSize {
-		return nil, errors.New("download file changed while opening stream")
+		return nil, errors.New("download_stream: file changed while opening stream")
 	}
 	if modified := strings.TrimSpace(argString(args, "modified_at")); modified != "" {
 		if expectedTime, parseErr := time.Parse(time.RFC3339Nano, modified); parseErr == nil && !info.ModTime().UTC().Equal(expectedTime.UTC()) {
-			return nil, errors.New("download file changed while opening stream")
+			return nil, errors.New("download_stream: file changed while opening stream")
 		}
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("download_stream: open %q: %w", path, err)
 	}
 	defer file.Close()
 	streamContext, cancel := context.WithTimeout(context.Background(), fileStreamHTTPTimeout)
 	defer cancel()
 	if err := acquireFileStreamSlot(streamContext); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("download_stream: acquire stream slot: %w", err)
 	}
 	defer releaseFileStreamSlot()
 	request, err := http.NewRequestWithContext(streamContext, http.MethodPost, transferURL, io.NewSectionReader(file, offset, length))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("download_stream: create HTTP request: %w", err)
 	}
 	request.ContentLength = length
 	request.Header.Set("Content-Type", "application/octet-stream")
@@ -134,15 +134,15 @@ func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
 
 	response, err := fileStreamHTTPClient().Do(request)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("download_stream: HTTP request: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		if len(message) == 0 {
-			return nil, fmt.Errorf("file transfer endpoint returned %s", response.Status)
+			return nil, fmt.Errorf("download_stream: file transfer endpoint returned %s", response.Status)
 		}
-		return nil, fmt.Errorf("file transfer endpoint returned %s: %s", response.Status, strings.TrimSpace(string(message)))
+		return nil, fmt.Errorf("download_stream: file transfer endpoint returned %s: %s", response.Status, strings.TrimSpace(string(message)))
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	return json.Marshal(map[string]any{"sent": length})
@@ -151,26 +151,28 @@ func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
 func receiveUploadStream(args map[string]interface{}) (json.RawMessage, error) {
 	spec, err := parseUploadStreamSpec(args)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("upload_stream: invalid metadata: %w", err)
 	}
 	transferURL, err := buildFileTransferURL(args)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("upload_stream: build transfer URL: %w", err)
 	}
 	streamContext, cancel := context.WithCancel(context.Background())
 	streamKey := strings.TrimSpace(argString(args, "transfer_id"))
-	endActive := beginUploadStream(spec.UploadID)
+	endActive, lifecycleErr := beginUploadStream(spec.UploadID, streamKey, cancel)
+	if lifecycleErr != nil {
+		cancel()
+		return nil, lifecycleErr
+	}
 	defer endActive()
-	registerUploadStream(spec.UploadID, streamKey, cancel)
-	defer unregisterUploadStream(spec.UploadID, streamKey)
 	defer cancel()
 	if err := acquireFileStreamSlot(streamContext); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("upload_stream: acquire stream slot: %w", err)
 	}
 	defer releaseFileStreamSlot()
 	request, err := http.NewRequestWithContext(streamContext, http.MethodPost, transferURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("upload_stream: HTTP request: %w", err)
 	}
 	request.ContentLength = 0
 	request.Header.Set("Accept", "application/octet-stream")
@@ -181,20 +183,24 @@ func receiveUploadStream(args map[string]interface{}) (json.RawMessage, error) {
 	request.Header.Set("X-Komari-Transfer-Length", fmt.Sprintf("%d", spec.Expected))
 	response, err := fileStreamHTTPClient().Do(request)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("upload_stream: HTTP request: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		if len(message) == 0 {
-			return nil, fmt.Errorf("file transfer endpoint returned %s", response.Status)
+			return nil, fmt.Errorf("upload_stream: file transfer endpoint returned %s", response.Status)
 		}
-		return nil, fmt.Errorf("file transfer endpoint returned %s: %s", response.Status, strings.TrimSpace(string(message)))
+		return nil, fmt.Errorf("upload_stream: file transfer endpoint returned %s: %s", response.Status, strings.TrimSpace(string(message)))
 	}
 	if response.ContentLength >= 0 && response.ContentLength != spec.Expected {
-		return nil, fmt.Errorf("upload stream content length %d, want %d", response.ContentLength, spec.Expected)
+		return nil, fmt.Errorf("upload_stream: response content length %d, want %d", response.ContentLength, spec.Expected)
 	}
-	return writeUploadStreamChunk(spec, response.Body)
+	result, err := writeUploadStreamChunk(spec, response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("upload_stream: write chunk offset=%d length=%d: %w", spec.Offset, spec.Expected, err)
+	}
+	return result, nil
 }
 
 func acquireFileStreamSlot(ctx context.Context) error {
@@ -210,61 +216,58 @@ func releaseFileStreamSlot() {
 	<-fileStreamSlots
 }
 
-func registerUploadStream(uploadID, streamID string, cancel context.CancelFunc) {
-	if uploadID == "" || streamID == "" || cancel == nil {
-		return
-	}
-	uploadStreamsMu.Lock()
-	streams := uploadStreams[uploadID]
-	if streams == nil {
-		streams = make(map[string]context.CancelFunc)
-		uploadStreams[uploadID] = streams
-	}
-	streams[streamID] = cancel
-	uploadStreamsMu.Unlock()
-}
-
-func unregisterUploadStream(uploadID, streamID string) {
-	if uploadID == "" || streamID == "" {
-		return
-	}
-	uploadStreamsMu.Lock()
-	if streams := uploadStreams[uploadID]; streams != nil {
-		delete(streams, streamID)
-		if len(streams) == 0 {
-			delete(uploadStreams, uploadID)
-		}
-	}
-	uploadStreamsMu.Unlock()
-}
-
-func beginUploadStream(uploadID string) func() {
+// beginUploadStream registers the active request and its cancellation function
+// under one lock. This closes the race where upload_cancel arrives between
+// starting an operation and registering its HTTP request.
+func beginUploadStream(uploadID, streamID string, cancel context.CancelFunc) (func(), error) {
 	if uploadID == "" {
-		return func() {}
+		return func() {}, nil
 	}
-	uploadActiveMu.Lock()
-	state := uploadActive[uploadID]
+	uploadLifecycleMu.Lock()
+	state := uploadLifecycles[uploadID]
 	if state == nil {
-		state = &activeUploadStreams{idle: make(chan struct{})}
+		state = &uploadStreamLifecycle{
+			idle:    make(chan struct{}),
+			streams: make(map[string]context.CancelFunc),
+		}
 		close(state.idle)
-		uploadActive[uploadID] = state
+		uploadLifecycles[uploadID] = state
 	}
-	state.count++
-	if state.count == 1 {
+	if state.canceled {
+		uploadLifecycleMu.Unlock()
+		return nil, errors.New("upload session was cancelled")
+	}
+	state.active++
+	if state.active == 1 {
 		state.idle = make(chan struct{})
 	}
-	uploadActiveMu.Unlock()
-	return func() {
-		uploadActiveMu.Lock()
-		state := uploadActive[uploadID]
-		if state != nil && state.count > 0 {
-			state.count--
-			if state.count == 0 {
-				close(state.idle)
-			}
-		}
-		uploadActiveMu.Unlock()
+	if streamID != "" && cancel != nil {
+		state.streams[streamID] = cancel
 	}
+	uploadLifecycleMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			uploadLifecycleMu.Lock()
+			state := uploadLifecycles[uploadID]
+			if state != nil {
+				if streamID != "" {
+					delete(state.streams, streamID)
+				}
+				if state.active > 0 {
+					state.active--
+					if state.active == 0 {
+						close(state.idle)
+						if !state.canceled {
+							delete(uploadLifecycles, uploadID)
+						}
+					}
+				}
+			}
+			uploadLifecycleMu.Unlock()
+		})
+	}, nil
 }
 
 func waitUploadStreams(uploadID string) {
@@ -272,17 +275,17 @@ func waitUploadStreams(uploadID string) {
 		return
 	}
 	for {
-		uploadActiveMu.Lock()
-		state := uploadActive[uploadID]
-		if state == nil || state.count == 0 {
+		uploadLifecycleMu.Lock()
+		state := uploadLifecycles[uploadID]
+		if state == nil || state.active == 0 {
 			if state != nil {
-				delete(uploadActive, uploadID)
+				delete(uploadLifecycles, uploadID)
 			}
-			uploadActiveMu.Unlock()
+			uploadLifecycleMu.Unlock()
 			return
 		}
 		idle := state.idle
-		uploadActiveMu.Unlock()
+		uploadLifecycleMu.Unlock()
 		<-idle
 	}
 }
@@ -291,13 +294,22 @@ func cancelUploadStreams(uploadID string) {
 	if uploadID == "" {
 		return
 	}
-	uploadStreamsMu.Lock()
-	streams := uploadStreams[uploadID]
-	cancellations := make([]context.CancelFunc, 0, len(streams))
-	for _, cancel := range streams {
+	uploadLifecycleMu.Lock()
+	state := uploadLifecycles[uploadID]
+	if state == nil {
+		state = &uploadStreamLifecycle{
+			idle:    make(chan struct{}),
+			streams: make(map[string]context.CancelFunc),
+		}
+		close(state.idle)
+		uploadLifecycles[uploadID] = state
+	}
+	state.canceled = true
+	cancellations := make([]context.CancelFunc, 0, len(state.streams))
+	for _, cancel := range state.streams {
 		cancellations = append(cancellations, cancel)
 	}
-	uploadStreamsMu.Unlock()
+	uploadLifecycleMu.Unlock()
 	for _, cancel := range cancellations {
 		cancel()
 	}
@@ -365,65 +377,57 @@ func forgetUploadWriteLock(uploadID string) {
 func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMessage, error) {
 	lock := uploadWriteLock(spec.UploadID)
 	lock.Lock()
+	defer lock.Unlock()
 	uploadChunksMu.Lock()
 	state, exists := uploadChunks[spec.UploadID]
 	if spec.First {
-		if exists {
-			if err := removeUploadFileLocked(spec.UploadID); err != nil {
-				uploadChunksMu.Unlock()
-				lock.Unlock()
-				return nil, err
+		if !exists {
+			state = uploadChunkState{
+				ExpectedSize: spec.TotalSize,
+				ChunkSize:    spec.ChunkSize,
+				TargetPath:   spec.Path,
+				PartCount:    spec.ChunkCount,
+				Parts:        make(map[int64]struct{}),
 			}
+			partPath := uploadPartPathFor(spec.Path, spec.UploadID)
+			file, openErr := os.OpenFile(partPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+			if openErr != nil {
+				uploadChunksMu.Unlock()
+				return nil, openErr
+			}
+			if closeErr := file.Close(); closeErr != nil {
+				uploadChunksMu.Unlock()
+				return nil, closeErr
+			}
+			state.TempPath = partPath
+			uploadChunks[spec.UploadID] = state
+			exists = true
 		}
-		state = uploadChunkState{
-			ExpectedSize: spec.TotalSize,
-			ChunkSize:    spec.ChunkSize,
-			TargetPath:   spec.Path,
-			PartCount:    spec.ChunkCount,
-			Parts:        make(map[int64]struct{}),
-		}
-		partPath := uploadPartPathFor(spec.Path, spec.UploadID)
-		file, openErr := os.OpenFile(partPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-		if openErr != nil {
-			uploadChunksMu.Unlock()
-			lock.Unlock()
-			return nil, openErr
-		}
-		closeErr := file.Close()
-		if closeErr != nil {
-			uploadChunksMu.Unlock()
-			lock.Unlock()
-			return nil, closeErr
-		}
-		state.TempPath = partPath
-		uploadChunks[spec.UploadID] = state
-		exists = true
 	} else if !exists {
 		uploadChunksMu.Unlock()
-		lock.Unlock()
 		return nil, errors.New("unknown upload session")
 	}
 	if state.TargetPath != "" && filepath.Clean(state.TargetPath) != filepath.Clean(spec.Path) {
 		uploadChunksMu.Unlock()
-		lock.Unlock()
 		return nil, errors.New("upload target path does not match session")
 	}
 	if state.ExpectedSize != 0 && state.ExpectedSize != spec.TotalSize {
 		uploadChunksMu.Unlock()
-		lock.Unlock()
 		return nil, errors.New("upload total size does not match session")
 	}
 	if state.ChunkSize != 0 && state.ChunkSize != spec.ChunkSize {
 		uploadChunksMu.Unlock()
-		lock.Unlock()
 		return nil, errors.New("upload chunk size does not match session")
+	}
+	if state.PartCount != 0 && state.PartCount != spec.ChunkCount {
+		uploadChunksMu.Unlock()
+		return nil, errors.New("upload chunk count does not match session")
 	}
 	partPath := state.TempPath
 	if partPath == "" {
 		partPath = uploadPartPathFor(spec.Path, spec.UploadID)
 	}
 	uploadChunksMu.Unlock()
-	lock.Unlock()
 
 	file, err := os.OpenFile(partPath, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {

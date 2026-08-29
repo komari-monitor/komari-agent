@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,10 +34,16 @@ func resetUploadStreamState(t *testing.T) {
 	uploadWriteLocksMu.Lock()
 	uploadWriteLocks = make(map[string]*sync.Mutex)
 	uploadWriteLocksMu.Unlock()
+	uploadLifecycleMu.Lock()
+	uploadLifecycles = make(map[string]*uploadStreamLifecycle)
+	uploadLifecycleMu.Unlock()
 	t.Cleanup(func() {
 		uploadChunksMu.Lock()
 		uploadChunks = make(map[string]uploadChunkState)
 		uploadChunksMu.Unlock()
+		uploadLifecycleMu.Lock()
+		uploadLifecycles = make(map[string]*uploadStreamLifecycle)
+		uploadLifecycleMu.Unlock()
 	})
 }
 
@@ -92,6 +99,20 @@ func TestSendDownloadStreamUsesRawHTTPBody(t *testing.T) {
 	}
 	if result["sent"] != float64(len(data)) {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestFileStreamClientUsesHTTP11(t *testing.T) {
+	client := fileStreamHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.ForceAttemptHTTP2 {
+		t.Fatal("file stream transport must not force HTTP/2")
+	}
+	if len(transport.TLSNextProto) != 0 {
+		t.Fatalf("TLSNextProto = %#v, want an empty map", transport.TLSNextProto)
 	}
 }
 
@@ -184,4 +205,67 @@ func TestUploadStreamChunksWriteAtDistinctOffsets(t *testing.T) {
 	if !bytes.Equal(got, []byte("aaaabbbbcccc")) {
 		t.Fatalf("part = %q, want %q", got, "aaaabbbbcccc")
 	}
+}
+
+func TestFirstUploadStreamRetryPreservesOtherParts(t *testing.T) {
+	resetUploadStreamState(t)
+	root := t.TempDir()
+	spec := uploadStreamSpec{
+		Path:       resolveFilePath(filepath.Join(root, "retry.bin")),
+		UploadID:   "retry-first-stream",
+		ChunkIndex: 0,
+		ChunkCount: 2,
+		TotalSize:  8,
+		ChunkSize:  4,
+		Expected:   4,
+		First:      true,
+	}
+	if _, err := writeUploadStreamChunk(spec, bytes.NewReader([]byte("1111"))); err != nil {
+		t.Fatal(err)
+	}
+	second := spec
+	second.ChunkIndex = 1
+	second.Offset = 4
+	second.First = false
+	if _, err := writeUploadStreamChunk(second, bytes.NewReader([]byte("2222"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeUploadStreamChunk(spec, bytes.NewReader([]byte("1111"))); err != nil {
+		t.Fatal(err)
+	}
+	partPath := uploadPartPathFor(spec.Path, spec.UploadID)
+	got, err := os.ReadFile(partPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte("11112222")) {
+		t.Fatalf("part = %q, want %q", got, "11112222")
+	}
+}
+
+func TestCancelUploadStreamsPreventsLateStreamRegistration(t *testing.T) {
+	resetUploadStreamState(t)
+	cancelUploadStreams("cancel-before-start")
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := beginUploadStream("cancel-before-start", "late-stream", cancel); err == nil {
+		t.Fatal("late upload stream registration was accepted after cancellation")
+	}
+}
+
+func TestCancelUploadStreamsInterruptsActiveStream(t *testing.T) {
+	resetUploadStreamState(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	end, err := beginUploadStream("cancel-active", "active-stream", cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelUploadStreams("cancel-active")
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("active upload stream was not canceled")
+	}
+	end()
+	waitUploadStreams("cancel-active")
 }

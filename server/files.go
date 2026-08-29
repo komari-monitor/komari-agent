@@ -100,6 +100,15 @@ type fileReadResult struct {
 
 func handleFileOperation(operation v2.FileOperation) {
 	result := runFileOperation(operation)
+	if !result.OK {
+		log.Printf("[file-transfer] operation failed op=%s request_id=%s upload_id=%s transfer_id=%s: %s",
+			operation.Op,
+			operation.RequestID,
+			argString(operation.Args, "upload_id"),
+			argString(operation.Args, "transfer_id"),
+			result.Error,
+		)
+	}
 	postFileResult(result)
 }
 
@@ -170,7 +179,11 @@ func executeFileOperation(operation v2.FileOperation) (json.RawMessage, error) {
 // commitFileUpload is the control-plane-only finalization step for the raw
 // upload stream. It deliberately carries no file data.
 func commitFileUpload(args map[string]interface{}) (json.RawMessage, error) {
-	return writeFileChunk(args, "")
+	result, err := writeFileChunk(args, "")
+	if err == nil {
+		forgetUploadWriteLock(strings.TrimSpace(argString(args, "upload_id")))
+	}
+	return result, err
 }
 
 func listFiles(root string) (json.RawMessage, error) {
