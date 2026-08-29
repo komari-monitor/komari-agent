@@ -152,13 +152,25 @@ func executeFileOperation(operation v2.FileOperation) (json.RawMessage, error) {
 		return readFileDownloadChunk(operation.Args)
 	case "download_finish", "download_cancel":
 		return finishFileDownload(operation.Args)
+	case "download_stream":
+		return sendDownloadStream(operation.Args)
 	case "upload_chunk":
 		return writeFileChunk(operation.Args, operation.Data)
+	case "upload_stream":
+		return receiveUploadStream(operation.Args)
+	case "upload_commit":
+		return commitFileUpload(operation.Args)
 	case "upload_cancel":
 		return cancelFileUpload(operation.Args)
 	default:
 		return nil, fmt.Errorf("unsupported file operation: %s", operation.Op)
 	}
+}
+
+// commitFileUpload is the control-plane-only finalization step for the raw
+// upload stream. It deliberately carries no file data.
+func commitFileUpload(args map[string]interface{}) (json.RawMessage, error) {
+	return writeFileChunk(args, "")
 }
 
 func listFiles(root string) (json.RawMessage, error) {
@@ -718,6 +730,17 @@ func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	if uploadID == "" {
 		return nil, errors.New("upload_id is required")
 	}
+	// Stop any Agent-side HTTP body readers before removing the temporary file.
+	// This lets an explicit cancel interrupt a slow relay instead of waiting for
+	// the current chunk to drain.
+	cancelUploadStreams(uploadID)
+	waitUploadStreams(uploadID)
+	writeLock := uploadWriteLock(uploadID)
+	writeLock.Lock()
+	defer func() {
+		writeLock.Unlock()
+		forgetUploadWriteLock(uploadID)
+	}()
 	targetPath := strings.TrimSpace(argString(args, "path"))
 	if targetPath != "" {
 		targetPath = resolveFilePath(targetPath)
@@ -1028,6 +1051,18 @@ func writeFileChunk(args map[string]interface{}, encoded string) (json.RawMessag
 			return nil, errors.New("upload part file is missing")
 		}
 		partPath := agentPartPath
+		partInfo, statErr := os.Stat(partPath)
+		if statErr != nil {
+			return nil, statErr
+		}
+		if partInfo.Size() < state.ExpectedSize {
+			return nil, fmt.Errorf("upload part file is %d bytes, want %d", partInfo.Size(), state.ExpectedSize)
+		}
+		if partInfo.Size() > state.ExpectedSize {
+			if err := os.Truncate(partPath, state.ExpectedSize); err != nil {
+				return nil, err
+			}
+		}
 		targetDir := filepath.Dir(path)
 		if err := os.MkdirAll(targetDir, 0o755); err != nil {
 			return nil, err
