@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -61,48 +60,19 @@ func uploadBasicInfo() error {
 		"version":            update.CurrentVersion,
 	}
 
-	// 尝试上传完整数据
-	err := tryUploadData(data)
-	if err != nil {
-		// 兼容 <= 1.0.2
-		delete(data, "kernel_version")
-		// 兼容 <= 1.2.0
-		delete(data, "cpu_physical_cores")
-		err = tryUploadData(data)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return tryUploadData(data)
 }
 
 func tryUploadData(data map[string]interface{}) error {
-	protocolVersion := uploadProtocolVersion()
-	if protocolVersion >= 2 {
-		err := tryUploadDataWithProtocol(data, 2)
-		if shouldFallbackToV1(2, err) {
-			log.Printf("v2 basic info failed %d consecutive protocol attempts, falling back to v1", v2ProtocolFallbackThreshold)
-			setConnectionProtocolVersion(1)
-			return tryUploadDataWithProtocol(data, 1)
-		}
-		return err
-	}
-	return tryUploadDataWithProtocol(data, 1)
+	return tryUploadDataWithProtocol(data)
 }
 
-func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int) error {
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/uploadBasicInfo?token=" + flags.Token
-	payload, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-	if protocolVersion >= 2 {
-		endpoint = strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
-		payload = v2.BuildBasicInfoPayload(data)
-	}
+func tryUploadDataWithProtocol(data map[string]interface{}) error {
+	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
+	payload := v2.BuildBasicInfoPayload(data)
 	body := payload
 	compressed := false
-	if protocolVersion >= 2 && !flags.DisableCompression {
+	if !flags.DisableCompression {
 		if gz, err := transport.GzipBytes(payload); err == nil {
 			body = gz
 			compressed = true
@@ -135,13 +105,10 @@ func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int)
 	if resp.StatusCode != http.StatusOK {
 		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: message}
 	}
-	if protocolVersion >= 2 {
-		if len(bytes.TrimSpace(respBody)) > 0 {
-			if _, err := parseV2Response(respBody); err != nil {
-				return err
-			}
+	if len(bytes.TrimSpace(respBody)) > 0 {
+		if _, err := parseV2Response(respBody); err != nil {
+			return err
 		}
-		resetV2ProtocolFailures(protocolVersion)
 	}
 
 	return nil

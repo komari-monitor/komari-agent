@@ -3,8 +3,6 @@ package v2
 import (
 	"encoding/json"
 	"time"
-
-	v1 "github.com/komari-monitor/komari-agent/protocol/v1"
 )
 
 const (
@@ -41,6 +39,13 @@ type RPCError struct {
 	Code    int         `json:"code"`
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
+}
+
+type TaskResultParams struct {
+	TaskID     string    `json:"task_id"`
+	Result     string    `json:"result"`
+	ExitCode   int       `json:"exit_code"`
+	FinishedAt time.Time `json:"finished_at"`
 }
 
 type Event struct {
@@ -83,11 +88,11 @@ func NewRequest(id interface{}, method string, params interface{}) []byte {
 	return payload
 }
 
-func BuildReportPayload(report v1.ReportPayload) []byte {
+func BuildReportPayload(report []byte) []byte {
 	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report)})
 }
 
-func BuildReportRequest(id interface{}, report v1.ReportPayload, ackEventIDs []string) []byte {
+func BuildReportRequest(id interface{}, report []byte, ackEventIDs []string) []byte {
 	return NewRequest(id, MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
 }
 
