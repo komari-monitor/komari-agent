@@ -6,9 +6,7 @@ WORKDIR /app
 ARG TARGETOS
 ARG TARGETARCH
 
-COPY komari-agent-${TARGETOS}-${TARGETARCH} /app/komari-agent
-
-RUN chmod +x /app/komari-agent
+COPY --chmod=755 komari-agent-${TARGETOS}-${TARGETARCH} /app/komari-agent
 
 RUN touch /.komari-agent-container
 
