@@ -115,6 +115,13 @@ func isPhysicalDisk(part disk.PartitionStat) bool {
 	if fstype == "fuseblk" {
 		return true
 	}
+
+	// Android 的 /sdcard 通过 FUSE (/dev/fuse) 挂载真实存储，不是网络文件系统。
+	// 限定挂载点，避免将其他 FUSE 文件系统计入磁盘统计。
+	if part.Device == "/dev/fuse" && fstype == "fuse" && mountpoint == "/sdcard" {
+		return true
+	}
+
 	var fstypeToExclude = []string{
 		"tmpfs",
 		"devtmpfs",
