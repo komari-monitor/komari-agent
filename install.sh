@@ -319,16 +319,62 @@ case $arch in
 esac
 log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
 
+file_name="komari-agent-${os_name}-${arch}"
+
+resolve_snapshot_version() {
+    snapshot_api_url="https://api.github.com/repos/komari-monitor/komari-agent/releases?per_page=100"
+    if [ -n "$github_proxy" ]; then
+        snapshot_api_urls="${github_proxy}/${snapshot_api_url} ${snapshot_api_url}"
+    else
+        snapshot_api_urls="$snapshot_api_url"
+    fi
+
+    for api_url in $snapshot_api_urls; do
+        if ! releases_json=$(curl -fsSL --connect-timeout 15 \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: komari-agent-installer" \
+            "$api_url"); then
+            releases_json=""
+        fi
+
+        if [ -n "$releases_json" ]; then
+            RESOLVED_SNAPSHOT_VERSION=$(printf '%s\n' "$releases_json" |
+                grep -o '"tag_name":[[:space:]]*"Snapshot-[^"]*"' |
+                sed 's/.*"\(Snapshot-[^"]*\)".*/\1/' |
+                LC_ALL=C sort -r |
+                head -n 1)
+            if [ -n "$RESOLVED_SNAPSHOT_VERSION" ]; then
+                return 0
+            fi
+        fi
+
+        if [ "$api_url" != "$snapshot_api_url" ]; then
+            log_warning "Failed to resolve snapshot releases through GitHub proxy, retrying directly."
+        fi
+    done
+
+    return 1
+}
+
 version_to_install="latest"
 if [ -n "$install_version" ]; then
-    log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
-    version_to_install="$install_version"
+    if [ "$install_version" = "snapshot" ]; then
+        log_info "Resolving the latest snapshot version..."
+        if ! resolve_snapshot_version; then
+            log_error "Failed to resolve the latest snapshot version."
+            exit 1
+        fi
+        version_to_install="$RESOLVED_SNAPSHOT_VERSION"
+        log_success "Latest snapshot version: ${GREEN}$version_to_install${NC}"
+    else
+        log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
+        version_to_install="$install_version"
+    fi
 else
     log_info "No version specified, installing the latest version."
 fi
 
 # Construct download URL
-file_name="komari-agent-${os_name}-${arch}"
 if [ "$version_to_install" = "latest" ]; then
     download_path="latest/download"
 else

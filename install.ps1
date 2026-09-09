@@ -206,10 +206,65 @@ function Uninstall-Previous {
 }
 Uninstall-Previous
 
+function Get-LatestSnapshotVersion {
+    param([Parameter(Mandatory = $true)][string]$AssetName)
+
+    $ApiUrl = "https://api.github.com/repos/komari-monitor/komari-agent/releases?per_page=100"
+    $ApiUrls = @($ApiUrl)
+    if ($GitHubProxy -ne "") {
+        $ApiUrls = @("$GitHubProxy/$ApiUrl", $ApiUrl)
+    }
+
+    for ($i = 0; $i -lt $ApiUrls.Count; $i++) {
+        try {
+            Log-Info "Fetching snapshot releases from GitHub API..."
+            $releases = Invoke-RestMethod -Uri $ApiUrls[$i] -UseBasicParsing
+        }
+        catch {
+            $releases = $null
+        }
+
+        if ($releases) {
+            $latestSnapshot = $releases |
+            Where-Object {
+                $_.draft -eq $false -and
+                $_.prerelease -eq $true -and
+                $_.tag_name -like "Snapshot-*" -and
+                (@($_.assets.name) -contains $AssetName)
+            } |
+            Sort-Object -Property @{ Expression = { [datetime]$_.published_at }; Descending = $true }, @{ Expression = { $_.tag_name }; Descending = $true } |
+            Select-Object -First 1
+
+            if ($latestSnapshot) {
+                return $latestSnapshot.tag_name
+            }
+        }
+
+        if ($i -lt ($ApiUrls.Count - 1)) {
+            Log-Warning "Failed to resolve snapshot releases through GitHub proxy, retrying directly."
+        }
+    }
+
+    throw "No snapshot release contains asset $AssetName."
+}
+
 $versionToInstall = ""
 if ($InstallVersion -ne "") {
     Log-Info "Attempting to install specified version: $InstallVersion"
-    $versionToInstall = $InstallVersion
+    if ($InstallVersion -ieq "snapshot") {
+        Log-Info "Resolving the latest snapshot version..."
+        try {
+            $versionToInstall = Get-LatestSnapshotVersion -AssetName $BinaryName
+            Log-Success "Latest snapshot version fetched: $versionToInstall"
+        }
+        catch {
+            Log-Error "Failed to resolve the latest snapshot version: $_"
+            exit 1
+        }
+    }
+    else {
+        $versionToInstall = $InstallVersion
+    }
 }
 else {
     $ApiUrl = "https://api.github.com/repos/komari-monitor/komari-agent/releases/latest"
