@@ -3,13 +3,13 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -20,35 +20,32 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// WarnKomariRunning
-// 作为 SYSTEM（Session 0）运行时：
-// 1) 轮询已登录的交互会话（WTSActive）
-// 2) 对新检测到的会话，以该用户身份在其会话内启动当前进程（追加 --show-warning 参数）
-// 3) 用户态子进程会进入 ShowToast() 分支并发送 Toast
-func WarnKomariRunning() {
+func startSecurityWarning(ctx context.Context) func() {
+	warning := newSecurityWarning(flags.Endpoint, warningCurrentUser())
+	go warnWindowsSessions(ctx, warning)
+	return func() {}
+}
 
+func warnWindowsSessions(ctx context.Context, warning securityWarning) {
+	// Keep service notifications in logged-in users' sessions, never in Session 0.
 	// 启用权限
 	if err := enablePrivileges([]string{"SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"}); err != nil {
 		log.Printf("[warn] enabling privileges failed: %v", err)
 	}
 
 	seen := map[uint32]struct{}{}
-	var mu sync.Mutex
-
-	sessions := []uint32{}
-	for _, sid := range sessions {
-		seen[sid] = struct{}{}
-	}
 
 	// 轮询新登录
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
 		current, err := enumerateActiveSessions()
 		if err != nil {
 			log.Printf("[warn] enumerateActiveSessions error: %v", err)
-			continue
 		}
 
 		// 将 current 列表转换为集合，便于清理旧会话
@@ -59,37 +56,46 @@ func WarnKomariRunning() {
 
 		// 找到新出现的会话 -> 在该会话启动进程
 		for _, sid := range current {
-			mu.Lock()
 			_, known := seen[sid]
 			if !known {
-				seen[sid] = struct{}{}
-				mu.Unlock()
-				if err := launchSelfInSession(sid, []string{"--show-warning"}); err != nil {
+				if err := launchSelfInSession(sid, warningHelperArgs(warning)); err != nil {
 					log.Printf("[warn] launch in session %d failed: %v", sid, err)
 				} else {
+					seen[sid] = struct{}{}
 					log.Printf("[info] launched toast helper in session %d", sid)
 				}
-			} else {
-				mu.Unlock()
 			}
 		}
 
 		// 清理不再存在的会话，避免 map 膨胀
-		mu.Lock()
-		for sid := range seen {
-			if _, ok := currentSet[sid]; !ok {
-				delete(seen, sid)
+		if err == nil {
+			for sid := range seen {
+				if _, ok := currentSet[sid]; !ok {
+					delete(seen, sid)
+				}
 			}
 		}
-		mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
 // ShowToast 在用户态中执行
 func ShowToast() {
-	title := "Komari is Running"
-	message := "The remote control software \"Komari\" is running, which allows others to control your computer. If this was not initiated by you, please terminate the program immediately."
+	warning := newSecurityWarning(flags.Endpoint, warningCurrentUser())
+	if warningPanelHost != "" {
+		warning.PanelHost = warningSingleLine(warningPanelHost)
+	}
+	if warningRunAsUser != "" {
+		warning.RunAsUser = warningSingleLine(warningRunAsUser)
+	}
+	showSecurityToast(warning)
+}
 
+func showSecurityToast(warning securityWarning) {
 	const aumid = "Komari.Monitor.Agent"
 	const linkName = "Komari Warning (Auto Delete Later)"
 
@@ -97,14 +103,7 @@ func ShowToast() {
 		log.Printf("[warn] ensureStartMenuShortcut failed: %v", err)
 	}
 
-	n := toast.Notification{
-		AppID:   aumid,
-		Title:   title,
-		Message: message,
-		Actions: []toast.Action{
-			{Type: "protocol", Label: "Help", Arguments: "https://komari-document.pages.dev/faq/uninstall.html"},
-		},
-	}
+	n := securityToast(warning)
 	if err := n.Push(); err != nil {
 		log.Printf("[warn] toast push failed: %v", err)
 	}
@@ -117,6 +116,28 @@ func ShowToast() {
 			log.Printf("[warn] remove shortcut failed: %v", err)
 		}
 	}
+}
+
+func securityToast(warning securityWarning) toast.Notification {
+	return toast.Notification{
+		AppID:               "Komari.Monitor.Agent",
+		Title:               escapeToastText(warningTitle),
+		Message:             escapeToastText(warning.message()),
+		Duration:            toast.Long,
+		ActivationArguments: warningUninstallURL,
+		Actions: []toast.Action{
+			{Type: "protocol", Label: "Uninstall Komari Agent", Arguments: warningUninstallURL},
+		},
+	}
+}
+
+// toast.v1 embeds text in CDATA inside an expandable PowerShell here-string.
+func escapeToastText(text string) string {
+	return strings.NewReplacer("`", "``", "$", "`$", "]]>", "]]]]><![CDATA[>").Replace(text)
+}
+
+func warningHelperArgs(warning securityWarning) []string {
+	return []string{"--show-warning", "--warning-panel-host", warning.PanelHost, "--warning-run-as-user", warning.RunAsUser}
 }
 
 // ensureStartMenuShortcut 使用 WScript.Shell 创建 .lnk 并设置 AppUserModelID
@@ -273,12 +294,12 @@ func launchSelfInSession(sessionID uint32, extraArgs []string) error {
 	}
 	defer primary.Close()
 
-	exePath, _ := os.Executable()
-	// 仅保留进程名，去掉已有的 --show-warning，避免递归
-	baseArgs := filterArgs(os.Args[1:], "--show-warning")
-	fullArgs := append([]string{quoteIfNeeded(exePath)}, baseArgs...)
-	fullArgs = append(fullArgs, extraArgs...)
-	cmdlineStr := strings.Join(fullArgs, " ")
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	// Never forward tokens, config paths or service-only arguments to a user session.
+	cmdlineStr := windows.ComposeCommandLine(append([]string{exePath}, extraArgs...))
 	cmdline, err := windows.UTF16PtrFromString(cmdlineStr)
 	if err != nil {
 		return fmt.Errorf("UTF16PtrFromString: %w", err)
@@ -387,22 +408,4 @@ func destroyEnvironmentBlock(env *uint16) {
 	userenv := windows.NewLazySystemDLL("userenv.dll")
 	proc := userenv.NewProc("DestroyEnvironmentBlock")
 	_, _, _ = proc.Call(uintptr(unsafe.Pointer(env)))
-}
-
-func quoteIfNeeded(s string) string {
-	if strings.ContainsAny(s, " \t\"") {
-		return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\""
-	}
-	return s
-}
-
-func filterArgs(args []string, drop string) []string {
-	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == drop {
-			continue
-		}
-		out = append(out, args[i])
-	}
-	return out
 }
