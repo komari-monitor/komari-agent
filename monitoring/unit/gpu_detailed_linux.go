@@ -15,11 +15,11 @@ var vendorType = getDetailedVendor()
 
 // DetailedGPUInfo 详细GPU信息结构体
 type DetailedGPUInfo struct {
-	Name         string  `json:"name"`          // GPU型号
-	MemoryTotal  uint64  `json:"memory_total"`  // 总显存 (字节)
-	MemoryUsed   uint64  `json:"memory_used"`   // 已用显存 (字节)
-	Utilization  float64 `json:"utilization"`   // GPU使用率 (0-100)
-	Temperature  uint64  `json:"temperature"`   // 温度 (摄氏度)
+	Name        string  `json:"name"`         // GPU型号
+	MemoryTotal uint64  `json:"memory_total"` // 总显存 (字节)
+	MemoryUsed  uint64  `json:"memory_used"`  // 已用显存 (字节)
+	Utilization float64 `json:"utilization"`  // GPU使用率 (0-100)
+	Temperature uint64  `json:"temperature"`  // 温度 (摄氏度)
 }
 
 func getDetailedVendor() uint8 {
@@ -47,18 +47,10 @@ func getNvidiaDetailedStat() ([]float64, error) {
 }
 
 func getAMDDetailedStat() ([]float64, error) {
-	rsmi := &ROCmSMI{
-		BinPath: "/opt/rocm/bin/rocm-smi",
+	if data, err := getAMDROCmDetailedStat(); err == nil && len(data) > 0 {
+		return data, nil
 	}
-	err := rsmi.Start()
-	if err != nil {
-		return nil, err
-	}
-	data, err := rsmi.GatherUsage()
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
+	return getAMDSysfsDetailedStat()
 }
 
 func getNvidiaDetailedHost() ([]string, error) {
@@ -77,18 +69,10 @@ func getNvidiaDetailedHost() ([]string, error) {
 }
 
 func getAMDDetailedHost() ([]string, error) {
-	rsmi := &ROCmSMI{
-		BinPath: "/opt/rocm/bin/rocm-smi",
+	if data, err := getAMDROCmDetailedHost(); err == nil && len(data) > 0 {
+		return data, nil
 	}
-	err := rsmi.Start()
-	if err != nil {
-		return nil, err
-	}
-	data, err := rsmi.GatherModel()
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
+	return getAMDSysfsDetailedHost()
 }
 
 // GetDetailedGPUHost 获取GPU型号信息
@@ -162,52 +146,76 @@ func getNvidiaDetailedInfo() ([]DetailedGPUInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	data, err := smi.GatherDetailedInfo()
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var gpuInfos []DetailedGPUInfo
 	for _, nvidiaInfo := range data {
 		gpuInfo := DetailedGPUInfo{
-			Name:         nvidiaInfo.Name,
-			MemoryTotal:  nvidiaInfo.MemoryTotal,
-			MemoryUsed:   nvidiaInfo.MemoryUsed,
-			Utilization:  nvidiaInfo.Utilization,
-			Temperature:  nvidiaInfo.Temperature,
+			Name:        nvidiaInfo.Name,
+			MemoryTotal: nvidiaInfo.MemoryTotal,
+			MemoryUsed:  nvidiaInfo.MemoryUsed,
+			Utilization: nvidiaInfo.Utilization,
+			Temperature: nvidiaInfo.Temperature,
 		}
 		gpuInfos = append(gpuInfos, gpuInfo)
 	}
-	
+
 	return gpuInfos, nil
 }
 
 func getAMDDetailedInfo() ([]DetailedGPUInfo, error) {
+	if gpuInfos, err := getAMDROCmDetailedInfo(); err == nil && len(gpuInfos) > 0 {
+		return gpuInfos, nil
+	}
+	return getAMDSysfsDetailedInfo()
+}
+
+func getAMDROCmDetailedStat() ([]float64, error) {
 	rsmi := &ROCmSMI{
 		BinPath: "/opt/rocm/bin/rocm-smi",
 	}
-	err := rsmi.Start()
-	if err != nil {
+	if err := rsmi.Start(); err != nil {
 		return nil, err
 	}
-	
+	return rsmi.GatherUsage()
+}
+
+func getAMDROCmDetailedHost() ([]string, error) {
+	rsmi := &ROCmSMI{
+		BinPath: "/opt/rocm/bin/rocm-smi",
+	}
+	if err := rsmi.Start(); err != nil {
+		return nil, err
+	}
+	return rsmi.GatherModel()
+}
+
+func getAMDROCmDetailedInfo() ([]DetailedGPUInfo, error) {
+	rsmi := &ROCmSMI{
+		BinPath: "/opt/rocm/bin/rocm-smi",
+	}
+	if err := rsmi.Start(); err != nil {
+		return nil, err
+	}
+
 	data, err := rsmi.GatherDetailedInfo()
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var gpuInfos []DetailedGPUInfo
 	for _, amdInfo := range data {
-		gpuInfo := DetailedGPUInfo{
-			Name:         amdInfo.Name,
-			MemoryTotal:  amdInfo.MemoryTotal,
-			MemoryUsed:   amdInfo.MemoryUsed,
-			Utilization:  amdInfo.Utilization,
-			Temperature:  amdInfo.Temperature,
-		}
-		gpuInfos = append(gpuInfos, gpuInfo)
+		gpuInfos = append(gpuInfos, DetailedGPUInfo{
+			Name:        amdInfo.Name,
+			MemoryTotal: amdInfo.MemoryTotal,
+			MemoryUsed:  amdInfo.MemoryUsed,
+			Utilization: amdInfo.Utilization,
+			Temperature: amdInfo.Temperature,
+		})
 	}
-	
 	return gpuInfos, nil
 }
