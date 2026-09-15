@@ -36,6 +36,12 @@ func startSecurityWarning(ctx context.Context) func() {
 		return func() {}
 	}
 	removeLegacyUpdateMOTDWarning(legacyUpdateMOTDPath)
+	if flags.DisableWebSsh {
+		if err := removeInstalledMOTDWarning(linuxMOTDPath); err != nil {
+			log.Printf("[warn] could not remove MOTD warning: %v", err)
+		}
+		return func() {}
+	}
 	cleanup, err := installMOTDWarning(
 		linuxMOTDPath,
 		newSecurityWarning(flags.Endpoint, warningCurrentUser()),
@@ -46,6 +52,24 @@ func startSecurityWarning(ctx context.Context) func() {
 	}
 	log.Printf("[warn] remote control is enabled; MOTD warning appended")
 	return cleanup
+}
+
+func removeInstalledMOTDWarning(path string) error {
+	original, err := readMOTD(path)
+	if err != nil {
+		return err
+	}
+	if !original.exists {
+		return nil
+	}
+	content, found, err := removeMOTDWarning(original.original)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	return writeMOTD(original, []byte(content))
 }
 
 func removeLegacyUpdateMOTDWarning(path string) {

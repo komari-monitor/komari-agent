@@ -135,6 +135,33 @@ func TestMOTDWarningCreatesAndRemovesMissingFile(t *testing.T) {
 	}
 }
 
+func TestMOTDWarningIsRemovedWhenRemoteControlIsDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "motd")
+	const original = "Welcome to the server.\n"
+	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := installMOTDWarning(path, newSecurityWarning("https://panel.example.com", "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+
+	if err := removeInstalledMOTDWarning(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), motdWarningStart) {
+		t.Fatalf("MOTD warning remained after remote control was disabled: %q", data)
+	}
+	if !strings.Contains(string(data), original) {
+		t.Fatalf("original MOTD content was not preserved: %q", data)
+	}
+}
+
 func TestMOTDWarningRejectsMalformedManagedBlock(t *testing.T) {
 	for name, content := range map[string]string{
 		"incomplete": motdWarningStart + "\npartial\n",
