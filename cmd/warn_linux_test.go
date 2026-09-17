@@ -94,6 +94,72 @@ func TestMOTDWarningIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMOTDWarningRemovesStaleWarningAfterRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		oldEndpoint string
+		newEndpoint string
+	}{
+		{"same panel", "https://panel.example.com", "https://panel.example.com"},
+		{"different panel", "https://old.example.com", "https://new.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "motd")
+			const (
+				original       = "Welcome to the server.\n"
+				cleanedContent = "Welcome to the server.\n\nadministrator change\n"
+			)
+			if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := installMOTDWarning(path, newSecurityWarning(tc.oldEndpoint, "root")); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, append(data, []byte("administrator change\n")...), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			cleanup, err := installMOTDWarning(path, newSecurityWarning(tc.newEndpoint, "root"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanup()
+
+			data, err = os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), motdWarningStart) {
+				t.Fatalf("stale warning remained after cleanup: %q", data)
+			}
+			if string(data) != cleanedContent {
+				t.Fatalf("stale cleanup did not preserve the cleaned base and administrator content:\nwant %q\n got %q", cleanedContent, data)
+			}
+		})
+	}
+}
+
+func TestMOTDWarningRemovesFileContainingOnlyStaleWarning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "motd")
+	if _, err := installMOTDWarning(path, newSecurityWarning("https://old.example.com", "root")); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := installMOTDWarning(path, newSecurityWarning("https://new.example.com", "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file containing only a stale warning was not removed: %v", err)
+	}
+}
+
 func TestMOTDWarningPreservesAdministratorChanges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "motd")
 	if err := os.WriteFile(path, []byte("before\n"), 0644); err != nil {

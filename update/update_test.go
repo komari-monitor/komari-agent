@@ -1,10 +1,28 @@
 package update
 
 import (
+	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/blang/semver"
+	"github.com/rhysd/go-github-selfupdate/selfupdate"
 )
+
+type fakeSelfUpdater struct {
+	updateSelf func(semver.Version, string) (*selfupdate.Release, error)
+	updateTo   func(*selfupdate.Release, string) error
+}
+
+func (f *fakeSelfUpdater) UpdateSelf(current semver.Version, slug string) (*selfupdate.Release, error) {
+	return f.updateSelf(current, slug)
+}
+
+func (f *fakeSelfUpdater) UpdateTo(release *selfupdate.Release, cmdPath string) error {
+	return f.updateTo(release, cmdPath)
+}
 
 // TestParseVersion 验证 parseVersion 能够解析各种版本号格式，包括带 v/V 前缀、预发布和构建元数据
 func TestParseVersion(t *testing.T) {
@@ -177,6 +195,83 @@ func TestSnapshotNeedsUpdate(t *testing.T) {
 	}
 	if !snapshotNeedsUpdate("Snapshot-2607061100", latest) {
 		t.Errorf("snapshotNeedsUpdate() should be true for an older snapshot tag")
+	}
+}
+
+func TestStableUpdateReturnsRestartRequired(t *testing.T) {
+	current := semver.MustParse("1.2.3")
+	updater := &fakeSelfUpdater{
+		updateSelf: func(gotCurrent semver.Version, gotRepo string) (*selfupdate.Release, error) {
+			if !gotCurrent.Equals(current) {
+				t.Fatalf("UpdateSelf current = %s, want %s", gotCurrent, current)
+			}
+			if gotRepo != Repo {
+				t.Fatalf("UpdateSelf repo = %q, want %q", gotRepo, Repo)
+			}
+			return &selfupdate.Release{Version: semver.MustParse("1.2.4")}, nil
+		},
+	}
+
+	if err := checkAndUpdateStable(current, updater); !errors.Is(err, ErrRestartRequired) {
+		t.Fatalf("checkAndUpdateStable() error = %v, want ErrRestartRequired", err)
+	}
+}
+
+func TestSnapshotUpdateReturnsRestartRequired(t *testing.T) {
+	oldVersion := CurrentVersion
+	CurrentVersion = "Snapshot-2607061100"
+	t.Cleanup(func() { CurrentVersion = oldVersion })
+
+	assetName := expectedAssetName(runtime.GOOS, runtime.GOARCH)
+	release := testRelease("Snapshot-2607061200", true, false, time.Now(), assetName)
+	updater := &fakeSelfUpdater{
+		updateTo: func(gotRelease *selfupdate.Release, gotPath string) error {
+			if gotRelease.AssetURL != release.Assets[0].BrowserDownloadURL {
+				t.Fatalf("UpdateTo asset = %q, want %q", gotRelease.AssetURL, release.Assets[0].BrowserDownloadURL)
+			}
+			if gotPath == "" {
+				t.Fatal("UpdateTo received an empty executable path")
+			}
+			return nil
+		},
+	}
+	lister := func(owner, repo string) ([]githubRelease, error) {
+		if owner != "komari-monitor" || repo != "komari-agent" {
+			t.Fatalf("list releases repo = %s/%s, want komari-monitor/komari-agent", owner, repo)
+		}
+		return []githubRelease{release}, nil
+	}
+
+	if err := checkAndUpdateSnapshot(updater, lister, func() bool { return false }); !errors.Is(err, ErrRestartRequired) {
+		t.Fatalf("checkAndUpdateSnapshot() error = %v, want ErrRestartRequired", err)
+	}
+}
+
+func TestScheduledUpdateStopsAfterRestartRequired(t *testing.T) {
+	ticks := make(chan time.Time, 3)
+	ticks <- time.Now()
+	ticks <- time.Now()
+	ticks <- time.Now()
+
+	checks := 0
+	restarts := 0
+	runScheduledUpdates(
+		ticks,
+		func() error {
+			checks++
+			if checks == 1 {
+				return errors.New("transient update check failure")
+			}
+			return ErrRestartRequired
+		},
+		func() { restarts++ },
+	)
+
+	if checks != 2 {
+		t.Fatalf("scheduled checks = %d, want 2", checks)
+	}
+	if restarts != 1 {
+		t.Fatalf("restart handoffs = %d, want 1", restarts)
 	}
 }
 

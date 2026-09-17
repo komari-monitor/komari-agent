@@ -129,13 +129,13 @@ func installMOTDWarning(path string, warning securityWarning) (func(), error) {
 				return
 			}
 			if current.original == installedContent {
-				if !original.exists {
+				if !original.exists || managedOnly {
 					if err := os.Remove(current.target); err != nil && !os.IsNotExist(err) {
 						log.Printf("[warn] could not remove temporary MOTD: %v", err)
 					}
 					return
 				}
-				if err := writeMOTD(current, []byte(original.original)); err != nil {
+				if err := writeMOTD(current, []byte(base)); err != nil {
 					log.Printf("[warn] could not restore MOTD: %v", err)
 				}
 				return

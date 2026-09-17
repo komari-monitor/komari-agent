@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -58,12 +59,11 @@ var RootCmd = &cobra.Command{
 
 		stopWarning := startSecurityWarning(stopCtx)
 		defer stopWarning()
+		shutdown := newShutdownCoordinator(stopWarning, netstatic.Stop, os.Exit)
 		go func() {
 			<-stopCtx.Done()
 			log.Printf("shutting down gracefully...")
-			stopWarning()
-			netstatic.Stop()
-			os.Exit(0)
+			shutdown.shutdown(0)
 		}()
 
 		if flags.MonthRotate != 0 {
@@ -120,10 +120,12 @@ var RootCmd = &cobra.Command{
 		// 自动更新
 		if !flags.DisableAutoUpdate {
 			err := update.CheckAndUpdate()
-			if err != nil {
-				log.Println("[ERROR]", err)
+			if handleUpdateCheckResult(err, shutdown) {
+				return nil
 			}
-			go update.DoUpdateWorks()
+			go update.DoUpdateWorks(func() {
+				shutdown.shutdown(42)
+			})
 		}
 		go server.DoUploadBasicInfoWorks()
 		for {
@@ -131,6 +133,17 @@ var RootCmd = &cobra.Command{
 			server.EstablishWebSocketConnection()
 		}
 	},
+}
+
+func handleUpdateCheckResult(err error, shutdown *shutdownCoordinator) bool {
+	if errors.Is(err, update.ErrRestartRequired) {
+		shutdown.shutdown(42)
+		return true
+	}
+	if err != nil {
+		log.Println("[ERROR]", err)
+	}
+	return false
 }
 
 func Execute() {

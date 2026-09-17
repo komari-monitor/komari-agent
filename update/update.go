@@ -2,6 +2,7 @@ package update
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,8 @@ import (
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/rhysd/go-github-selfupdate/selfupdate"
 )
+
+var ErrRestartRequired = errors.New("update installed; restart required")
 
 var (
 	CurrentVersion string = "0.0.1"
@@ -62,6 +65,14 @@ type snapshotReleaseCandidate struct {
 	PublishedAt time.Time
 	Asset       githubReleaseAsset
 }
+
+type selfUpdater interface {
+	UpdateSelf(current semver.Version, slug string) (*selfupdate.Release, error)
+	UpdateTo(release *selfupdate.Release, cmdPath string) error
+}
+
+type releaseLister func(owner, repo string) ([]githubRelease, error)
+type containerCheck func() bool
 
 // parseVersion 解析可能带有 v/V 前缀，以及预发布或构建元数据的版本字符串
 func parseVersion(ver string) (semver.Version, error) {
@@ -239,14 +250,24 @@ func selfUpdateReleaseFromSnapshot(owner, repo string, candidate snapshotRelease
 	}
 }
 
-func DoUpdateWorks() {
+func DoUpdateWorks(onRestartRequired func()) {
 	ticker_ := time.NewTicker(time.Duration(6) * time.Hour)
-	for range ticker_.C {
-		CheckAndUpdate()
+	defer ticker_.Stop()
+	runScheduledUpdates(ticker_.C, CheckAndUpdate, onRestartRequired)
+}
+
+func runScheduledUpdates(ticks <-chan time.Time, check func() error, onRestartRequired func()) {
+	for range ticks {
+		if errors.Is(check(), ErrRestartRequired) {
+			if onRestartRequired != nil {
+				onRestartRequired()
+			}
+			return
+		}
 	}
 }
 
-func checkAndUpdateStable(currentSemVer semver.Version, updater *selfupdate.Updater) error {
+func checkAndUpdateStable(currentSemVer semver.Version, updater selfUpdater) error {
 	latest, err := updater.UpdateSelf(currentSemVer, Repo)
 	if err != nil {
 		return fmt.Errorf("failed to check for updates: %v", err)
@@ -269,12 +290,11 @@ func checkAndUpdateStable(currentSemVer semver.Version, updater *selfupdate.Upda
 	// 	return fmt.Errorf("failed to restart program: %v", err)
 	// }
 	log.Printf("Successfully updated to version %s\n", latest.Version)
-	os.Exit(42)
-	return nil
+	return ErrRestartRequired
 }
 
-func checkAndUpdateSnapshot(updater *selfupdate.Updater) error {
-	if isContainerAgent() {
+func checkAndUpdateSnapshot(updater selfUpdater, listReleases releaseLister, isContainer containerCheck) error {
+	if isContainer() {
 		log.Println("Snapshot agent is running in a container; skip binary self-update. Refresh the ghcr.io image tagged 'snapshot' instead.")
 		return nil
 	}
@@ -284,7 +304,7 @@ func checkAndUpdateSnapshot(updater *selfupdate.Updater) error {
 		return err
 	}
 
-	releases, err := listGitHubReleases(owner, repo)
+	releases, err := listReleases(owner, repo)
 	if err != nil {
 		return err
 	}
@@ -312,8 +332,7 @@ func checkAndUpdateSnapshot(updater *selfupdate.Updater) error {
 	}
 
 	log.Printf("Successfully updated to snapshot version %s\n", latest.TagName)
-	os.Exit(42)
-	return nil
+	return ErrRestartRequired
 }
 
 // 检查更新并执行自动更新
@@ -327,7 +346,7 @@ func CheckAndUpdate() error {
 	}
 
 	if detectBuildTrack(CurrentVersion) == snapshotTrack {
-		return checkAndUpdateSnapshot(updater)
+		return checkAndUpdateSnapshot(updater, listGitHubReleases, isContainerAgent)
 	}
 
 	currentSemVer, err := parseVersion(CurrentVersion)
