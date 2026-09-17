@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	unit "github.com/komari-monitor/komari-agent/monitoring/unit"
+	diagv1 "github.com/r11234567/komari-proto/gen/go/komari/diag/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 )
 
@@ -26,15 +28,34 @@ type ActionResult struct {
 	Stdout      []byte
 	Stderr      []byte
 	AfterReport func(context.Context) error
+	// Diagnostics carries a typed performance snapshot for the read-only
+	// diagnostic actions, so a panel renders fields instead of parsing text.
+	Diagnostics *diagv1.DiagnosticsReport
+	// SSHAccess reports the state a temporary SSH action actually reached.
+	SSHAccess *rescuev1.TemporarySSHAccess
 }
 
-func ExecuteAction(ctx context.Context, config ActionConfig, action rescuev1.RescueAction, arguments []string) (ActionResult, error) {
+// ExecuteAction runs one bounded rescue action.
+//
+// sshPort applies only to the temporary SSH actions and arrives as a typed
+// field rather than through arguments: arguments stay categorically rejected
+// for every action, which is what keeps this helper from becoming a remote
+// shell by accident.
+func ExecuteAction(ctx context.Context, config ActionConfig, action rescuev1.RescueAction, arguments []string, sshPort uint32) (ActionResult, error) {
 	if len(arguments) != 0 {
 		return ActionResult{}, errors.New("rescue actions do not accept remote arguments")
 	}
 	switch action {
 	case rescuev1.RescueAction_RESCUE_ACTION_DIAGNOSTICS:
 		return machineDiagnostics(ctx)
+	case rescuev1.RescueAction_RESCUE_ACTION_DETAILED_CPU_METRICS:
+		return performanceDiagnostics(ctx, true, false)
+	case rescuev1.RescueAction_RESCUE_ACTION_DETAILED_MEMORY_METRICS:
+		return performanceDiagnostics(ctx, false, true)
+	case rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS:
+		return grantTemporarySSHAccess(ctx, config, sshPort)
+	case rescuev1.RescueAction_RESCUE_ACTION_REVOKE_TEMPORARY_SSH_ACCESS:
+		return revokeTemporarySSHAccess(ctx, config)
 	case rescuev1.RescueAction_RESCUE_ACTION_SHUTDOWN:
 		return preparePowerAction(config, false)
 	case rescuev1.RescueAction_RESCUE_ACTION_REBOOT:
@@ -61,6 +82,20 @@ func ExecuteAction(ctx context.Context, config ActionConfig, action rescuev1.Res
 	default:
 		return ActionResult{}, fmt.Errorf("unsupported rescue action %s", action)
 	}
+}
+
+// performanceDiagnostics collects a read-only performance snapshot.
+//
+// It is platform-neutral because the collector itself is where the platform
+// difference lives. Unlike every other action here it needs no privilege: it
+// reads kernel counters any user may read, which is what lets the control
+// plane offer it without a fresh two-factor proof.
+func performanceDiagnostics(_ context.Context, includeCPU, includeMemory bool) (ActionResult, error) {
+	report, err := unit.CollectDiagnostics(includeCPU, includeMemory)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	return ActionResult{Diagnostics: report}, nil
 }
 
 func ensureNoActiveIsolation(config ActionConfig) error {

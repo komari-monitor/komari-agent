@@ -80,6 +80,8 @@ github.com/r11234567/komari-proto v0.1.20 h1:+yiJ8FAshR0gL1Jf9cZ/IdB2OYp3AAgq2W7
 github.com/r11234567/komari-proto v0.1.20/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/r11234567/komari-proto v0.1.23 h1:lETnreo562bseqWAI82SD7qCfTj7FVJ2AZ7iQ7bcVOU=
 github.com/r11234567/komari-proto v0.1.23/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.29 h1:xjXG198myTfOahAigRbBh+x62IxwgU7BiSpx1DwnAaw=
+github.com/r11234567/komari-proto v0.1.29/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/rhysd/go-github-selfupdate v1.2.3 h1:iaa+J202f+Nc+A8zi75uccC8Wg3omaM7HDeimXA22Ag=
 github.com/rhysd/go-github-selfupdate v1.2.3/go.mod h1:mp/N8zj6jFfBQy/XMYoWsmfzxazpPAODuqarmPDe2Rg=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=

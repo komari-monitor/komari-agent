@@ -9,14 +9,24 @@ import (
 )
 
 func TestExecuteActionRejectsRemoteArguments(t *testing.T) {
-	_, err := ExecuteAction(context.Background(), ActionConfig{}, rescuev1.RescueAction_RESCUE_ACTION_DIAGNOSTICS, []string{"whoami"})
+	_, err := ExecuteAction(context.Background(), ActionConfig{}, rescuev1.RescueAction_RESCUE_ACTION_DIAGNOSTICS, []string{"whoami"}, 0)
+	if err == nil || !strings.Contains(err.Error(), "do not accept remote arguments") {
+		t.Fatalf("ExecuteAction() error = %v, want remote argument rejection", err)
+	}
+}
+
+// The temporary SSH actions take a typed port, so arguments must stay rejected
+// for them too: accepting a port through arguments would reopen the very hole
+// the blanket rejection exists to close.
+func TestExecuteActionRejectsArgumentsForTemporarySSHAccess(t *testing.T) {
+	_, err := ExecuteAction(context.Background(), ActionConfig{}, rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS, []string{"22"}, 22)
 	if err == nil || !strings.Contains(err.Error(), "do not accept remote arguments") {
 		t.Fatalf("ExecuteAction() error = %v, want remote argument rejection", err)
 	}
 }
 
 func TestExecuteActionRejectsUnspecifiedAction(t *testing.T) {
-	_, err := ExecuteAction(context.Background(), ActionConfig{}, rescuev1.RescueAction_RESCUE_ACTION_UNSPECIFIED, nil)
+	_, err := ExecuteAction(context.Background(), ActionConfig{}, rescuev1.RescueAction_RESCUE_ACTION_UNSPECIFIED, nil, 0)
 	if err == nil || !strings.Contains(err.Error(), "unsupported rescue action") {
 		t.Fatalf("ExecuteAction() error = %v, want unsupported action rejection", err)
 	}
@@ -30,7 +40,7 @@ func TestExecuteActionRejectsDeprecatedActions(t *testing.T) {
 		rescuev1.RescueAction_RESCUE_ACTION_REPAIR_FIREWALL,
 		rescuev1.RescueAction_RESCUE_ACTION_RESTART_AGENT,
 	} {
-		if _, err := ExecuteAction(context.Background(), ActionConfig{}, action, nil); err == nil || !strings.Contains(err.Error(), "unsupported rescue action") {
+		if _, err := ExecuteAction(context.Background(), ActionConfig{}, action, nil, 0); err == nil || !strings.Contains(err.Error(), "unsupported rescue action") {
 			t.Errorf("ExecuteAction(%s) error = %v, want unsupported action rejection", action, err)
 		}
 	}

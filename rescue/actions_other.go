@@ -29,6 +29,19 @@ func unsupported() (ActionResult, error) {
 func machineDiagnostics(context.Context) (ActionResult, error)    { return unsupported() }
 func preparePowerAction(ActionConfig, bool) (ActionResult, error) { return unsupported() }
 func prepareAgentRestart(ActionConfig) (ActionResult, error)      { return unsupported() }
+
+func grantTemporarySSHAccess(context.Context, ActionConfig, uint32) (ActionResult, error) {
+	return unsupported()
+}
+func revokeTemporarySSHAccess(context.Context, ActionConfig) (ActionResult, error) {
+	return unsupported()
+}
+
+// ReconcileTemporarySSHAccess and CloseTemporarySSHAccess have nothing to
+// reconcile where the grant itself is unsupported, so they succeed rather than
+// failing the helper's lease loop.
+func ReconcileTemporarySSHAccess(context.Context, ActionConfig) error { return nil }
+func CloseTemporarySSHAccess(context.Context, ActionConfig) error     { return nil }
 func prepareInterfaceIsolation(ActionConfig, rescuev1.NetworkIsolationMode) (ActionResult, error) {
 	return unsupported()
 }

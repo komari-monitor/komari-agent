@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -96,11 +97,23 @@ func DefaultInstanceIDPath() string {
 }
 
 func (h *Helper) Run(ctx context.Context) error {
+	// A previous helper generation may have left a temporary SSH window open
+	// whose kernel timeout or revocation timer did not survive. Reconciling at
+	// startup is what makes the deadline hold across a restart rather than
+	// depending on a process that is already gone.
+	if err := ReconcileTemporarySSHAccess(ctx, h.action); err != nil {
+		log.Printf("reconcile temporary SSH access: %v", err)
+	}
 	if err := h.reportStatus(ctx, nil); err != nil {
 		return fmt.Errorf("report rescue helper status: %w", err)
 	}
 	afterAssignmentID := ""
 	for {
+		// Reconciling once per lease bounds how long a lost timer can leave a
+		// window open to one lease interval, without any polling of its own.
+		if err := ReconcileTemporarySSHAccess(ctx, h.action); err != nil {
+			log.Printf("reconcile temporary SSH access: %v", err)
+		}
 		assignment, err := h.lease(ctx, afterAssignmentID)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -166,7 +179,7 @@ func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssi
 	cancelledByServer := make(chan struct{}, 1)
 	go h.watchCancellation(operationContext, assignment.AssignmentId, cancel, cancelledByServer)
 
-	result, actionErr := ExecuteAction(operationContext, h.action, session.Action, session.Arguments)
+	result, actionErr := ExecuteAction(operationContext, h.action, session.Action, session.Arguments, session.GetSshPort())
 	state := commonv1.OperationState_OPERATION_STATE_SUCCEEDED
 	var detail *commonv1.ErrorDetail
 	select {
@@ -183,10 +196,18 @@ func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssi
 		}
 	}
 	output := finalOutput(result, state)
-	if err := h.reportEvent(parent, &rescuev1.RescueEvent{
+	event := &rescuev1.RescueEvent{
 		SessionId: session.SessionId, Sequence: 1, OccurredAt: timestamppb.Now(), State: state,
 		Stream: rescuev1.RescueOutputStream_RESCUE_OUTPUT_STREAM_STDOUT, Output: output, Error: detail,
-	}); err != nil {
+	}
+	// Typed results travel alongside the text output rather than replacing it,
+	// so a panel that understands them renders fields while an older one still
+	// shows something useful.
+	if state == commonv1.OperationState_OPERATION_STATE_SUCCEEDED {
+		event.Diagnostics = result.Diagnostics
+		event.SshAccess = result.SSHAccess
+	}
+	if err := h.reportEvent(parent, event); err != nil {
 		return err
 	}
 	if state == commonv1.OperationState_OPERATION_STATE_SUCCEEDED && result.AfterReport != nil {

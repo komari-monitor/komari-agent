@@ -12,7 +12,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/cpuid/v2 v2.3.0
 	github.com/prometheus-community/pro-bing v0.9.1
-	github.com/r11234567/komari-proto v0.1.23
+	github.com/r11234567/komari-proto v0.1.29
 	github.com/rhysd/go-github-selfupdate v1.2.3
 	github.com/shirou/gopsutil/v4 v4.26.4
 	github.com/spf13/cobra v1.10.2

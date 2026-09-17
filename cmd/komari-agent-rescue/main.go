@@ -20,7 +20,9 @@ func main() {
 		log.Fatal(err)
 	}
 	var configFile string
+	var revokeTemporarySSH bool
 	flag.StringVar(&configFile, "config", "", "Restricted JSON helper configuration path")
+	flag.BoolVar(&revokeTemporarySSH, "revoke-temporary-ssh", false, "Close any open temporary SSH access window and exit")
 	flag.StringVar(&config.Endpoint, "endpoint", env("KOMARI_RESCUE_ENDPOINT", config.Endpoint), "Komari Connect endpoint")
 	flag.StringVar(&config.Token, "token", env("KOMARI_RESCUE_TOKEN", config.Token), "Agent API token")
 	flag.StringVar(&config.CFAccessClientID, "cf-access-client-id", env("KOMARI_RESCUE_CF_ACCESS_CLIENT_ID", config.CFAccessClientID), "Cloudflare Access service-token Client ID")
@@ -38,6 +40,16 @@ func main() {
 	flag.StringVar(&config.Action.IsolationStatePath, "isolation-state-file", env("KOMARI_RESCUE_ISOLATION_STATE_FILE", config.Action.IsolationStatePath), "Komari-managed network isolation state path")
 	flag.Parse()
 	config.Version = update.CurrentVersion
+	// The revocation timer runs this binary as a bare process with no
+	// credentials, so it must not require an endpoint or token: closing a
+	// firewall window is purely local and has to work when the control plane
+	// is exactly what is unreachable.
+	if revokeTemporarySSH {
+		if err := rescue.CloseTemporarySSHAccess(context.Background(), config.Action); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if err := run(config); err != nil {
 		log.Fatal(err)
 	}

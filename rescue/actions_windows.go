@@ -332,3 +332,22 @@ func uniqueStrings(values []string) []string {
 }
 
 func powerShellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
+
+// Temporary SSH exposure is not implemented on Windows. The Linux path relies
+// on a kernel-enforced nftables element timeout, or a systemd transient timer,
+// to close the window without the control plane; an equivalent here would need
+// a scheduled task whose failure modes differ enough to warrant its own
+// design rather than a partial port.
+func grantTemporarySSHAccess(context.Context, ActionConfig, uint32) (ActionResult, error) {
+	return ActionResult{}, errors.New("temporary SSH access is not supported on Windows")
+}
+
+func revokeTemporarySSHAccess(context.Context, ActionConfig) (ActionResult, error) {
+	return ActionResult{}, errors.New("temporary SSH access is not supported on Windows")
+}
+
+// ReconcileTemporarySSHAccess and CloseTemporarySSHAccess have nothing to
+// reconcile where the grant itself is unsupported, so they succeed rather than
+// failing the helper's lease loop.
+func ReconcileTemporarySSHAccess(context.Context, ActionConfig) error { return nil }
+func CloseTemporarySSHAccess(context.Context, ActionConfig) error     { return nil }
