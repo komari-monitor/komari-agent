@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -44,20 +45,21 @@ func uploadBasicInfo() error {
 	ipv4, ipv6, _ := monitoring.GetIPAddress()
 
 	data := map[string]interface{}{
-		"cpu_name":           cpu.CPUName,
-		"cpu_cores":          cpu.CPUCores,
-		"cpu_physical_cores": cpu.CPUPhysicalCores,
-		"arch":               cpu.CPUArchitecture,
-		"os":                 osname,
-		"kernel_version":     kernelVersion,
-		"ipv4":               ipv4,
-		"ipv6":               ipv6,
-		"mem_total":          monitoring.Ram().Total,
-		"swap_total":         monitoring.Swap().Total,
-		"disk_total":         monitoring.Disk().Total,
-		"gpu_name":           monitoring.GpuName(),
-		"virtualization":     monitoring.Virtualized(),
-		"version":            update.CurrentVersion,
+		"cpu_name":              cpu.CPUName,
+		"cpu_cores":             cpu.CPUCores,
+		"cpu_physical_cores":    cpu.CPUPhysicalCores,
+		"arch":                  cpu.CPUArchitecture,
+		"os":                    osname,
+		"kernel_version":        kernelVersion,
+		"ipv4":                  ipv4,
+		"ipv6":                  ipv6,
+		"mem_total":             monitoring.Ram().Total,
+		"swap_total":            monitoring.Swap().Total,
+		"disk_total":            monitoring.Disk().Total,
+		"gpu_name":              monitoring.GpuName(),
+		"virtualization":        monitoring.Virtualized(),
+		"version":               update.CurrentVersion,
+		"agent_report_interval": math.Max(1, flags.Interval),
 	}
 
 	return tryUploadData(data)
