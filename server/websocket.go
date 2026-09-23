@@ -183,7 +183,7 @@ func runV2PullLoop(ctx context.Context) {
 		pullID := fmt.Sprintf("pull-%d", time.Now().UnixNano())
 		ackIDs := snapshotV2AckEventIDs()
 		payload := v2.NewRequest(pullID, v2.MethodAgentPull, map[string]interface{}{
-			"capabilities":  []string{"exec", "ping", "message", "event", "terminal", "file"},
+			"capabilities":  []string{"exec", "ping", "message", "event", "terminal", "file", "startup_config"},
 			"ack_event_ids": ackIDs,
 		})
 		resp, err := postV2RequestContext(ctx, payload)
@@ -414,6 +414,13 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		} else {
 			log.Printf("bad v2 file params: %v", err)
 		}
+	case v2.MethodAgentStartupConfig:
+		var p v2.StartupConfigParams
+		if err := v2.BindParams(params, &p); err == nil && p.RequestID != "" {
+			go handleStartupConfig(p)
+			return true
+		}
+		log.Print("bad v2 startup configuration params")
 	default:
 		log.Printf("unknown v2 event method %s", method)
 	}

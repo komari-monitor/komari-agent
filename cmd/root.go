@@ -102,6 +102,12 @@ var RootCmd = &cobra.Command{
 				return fmt.Errorf("auto-discovery failed: %w", err)
 			}
 		}
+		if err := pkg_flags.CaptureStartupConfig(map[string]interface{}{
+			"warning_panel_host":  warningPanelHost,
+			"warning_run_as_user": warningRunAsUser,
+		}); err != nil {
+			return fmt.Errorf("failed to capture startup configuration: %w", err)
+		}
 		diskList, err := monitoring.DiskList()
 		if err != nil {
 			log.Println("Failed to get disk list:", err)
