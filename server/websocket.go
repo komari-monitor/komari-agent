@@ -34,7 +34,7 @@ const (
 	v2SeenEventLimit = 4096
 )
 
-func EstablishWebSocketConnection() {
+func EstablishWebSocketConnection(onRestartRequired func()) {
 	var conn *ws.SafeConn
 	defer func() {
 		if conn != nil {
@@ -72,7 +72,7 @@ func EstablishWebSocketConnection() {
 						log.Println("WebSocket connected using v2 protocol")
 						done := make(chan struct{})
 						readDone = done
-						go handleWebSocketMessages(conn, done)
+						go handleWebSocketMessages(conn, done, onRestartRequired)
 						break
 					} else {
 						log.Println("Failed to connect to WebSocket:", err)
@@ -83,7 +83,7 @@ func EstablishWebSocketConnection() {
 
 				if retry > flags.MaxRetries {
 					log.Println("Max retries reached.")
-					conn, err = runPostFallback(buildWebSocketEndpoint(), interval)
+					conn, err = runPostFallback(buildWebSocketEndpoint(), interval, onRestartRequired)
 					if err != nil {
 						log.Println("POST fallback stopped:", err)
 						return
@@ -91,7 +91,7 @@ func EstablishWebSocketConnection() {
 					log.Println("WebSocket recovered from POST fallback")
 					done := make(chan struct{})
 					readDone = done
-					go handleWebSocketMessages(conn, done)
+					go handleWebSocketMessages(conn, done, onRestartRequired)
 				}
 			}
 			if conn == nil || time.Now().Before(nextReportAt) {
@@ -140,11 +140,11 @@ func buildWebSocketEndpoint() string {
 	return websocketEndpoint
 }
 
-func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, error) {
+func runPostFallback(websocketEndpoint string, interval float64, onRestartRequired func()) (*ws.SafeConn, error) {
 	log.Println("Entering v2 POST fallback mode")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runV2PullLoop(ctx)
+	go runV2PullLoop(ctx, onRestartRequired)
 
 	reportTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
 	defer reportTicker.Stop()
@@ -162,7 +162,7 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 				continue
 			}
 			clearV2AckEventIDs(ackIDs)
-			processV2ResponseEvents(resp)
+			processV2ResponseEvents(resp, onRestartRequired)
 		case <-reconnectTicker.C:
 			conn, err := connectWebSocket(websocketEndpoint)
 			if err == nil {
@@ -173,7 +173,7 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 	}
 }
 
-func runV2PullLoop(ctx context.Context) {
+func runV2PullLoop(ctx context.Context, onRestartRequired func()) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -183,7 +183,7 @@ func runV2PullLoop(ctx context.Context) {
 		pullID := fmt.Sprintf("pull-%d", time.Now().UnixNano())
 		ackIDs := snapshotV2AckEventIDs()
 		payload := v2.NewRequest(pullID, v2.MethodAgentPull, map[string]interface{}{
-			"capabilities":  []string{"exec", "ping", "message", "event", "terminal", "file", "startup_config"},
+			"capabilities":  []string{"exec", "ping", "message", "event", "terminal", "file", "startup_config", "switch_version"},
 			"ack_event_ids": ackIDs,
 		})
 		resp, err := postV2RequestContext(ctx, payload)
@@ -202,7 +202,7 @@ func runV2PullLoop(ctx context.Context) {
 			continue
 		}
 		clearV2AckEventIDs(ackIDs)
-		processV2ResponseEvents(resp)
+		processV2ResponseEvents(resp, onRestartRequired)
 	}
 }
 
@@ -248,7 +248,7 @@ func postV2RequestContext(ctx context.Context, payload []byte) (*v2.Response, er
 	return rpcResp, nil
 }
 
-func processV2ResponseEvents(resp *v2.Response) {
+func processV2ResponseEvents(resp *v2.Response, onRestartRequired func()) {
 	if resp == nil || resp.Result == nil {
 		return
 	}
@@ -258,7 +258,7 @@ func processV2ResponseEvents(resp *v2.Response) {
 		return
 	}
 	for _, event := range result.Events {
-		if processV2Event(nil, event.Method, event.Params, event.ID) {
+		if processV2Event(nil, event.Method, event.Params, event.ID, onRestartRequired) {
 			addV2AckEventID(event.ID)
 		}
 	}
@@ -343,7 +343,7 @@ func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 	return ws.NewSafeConn(conn), nil
 }
 
-func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
+func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}, onRestartRequired func()) {
 	defer close(done)
 	for {
 		_, message_raw, err := conn.ReadMessage()
@@ -361,11 +361,11 @@ func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 			log.Printf("Bad v2 ws message version %q", message.JSONRPC)
 			continue
 		}
-		processV2Event(conn, message.Method, message.Params, "")
+		processV2Event(conn, message.Method, message.Params, "", onRestartRequired)
 	}
 }
 
-func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventID string) bool {
+func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventID string, onRestartRequired func()) bool {
 	if !markV2EventSeen(eventID) {
 		return true
 	}
@@ -421,6 +421,14 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			return true
 		}
 		log.Print("bad v2 startup configuration params")
+	case v2.MethodAgentSwitchVersion:
+		var p v2.SwitchVersionParams
+		if err := v2.BindParams(params, &p); err != nil {
+			log.Printf("bad v2 switch version params: %v", err)
+		} else {
+			go switchAgentVersion(p.Version, onRestartRequired)
+			return true
+		}
 	default:
 		log.Printf("unknown v2 event method %s", method)
 	}

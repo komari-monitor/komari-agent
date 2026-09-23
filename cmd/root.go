@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -123,12 +122,8 @@ var RootCmd = &cobra.Command{
 		if flags.IgnoreUnsafeCert {
 			http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		}
-		// 自动更新
+		// 自动更新：后台立即检查一次并按周期复查，避免启动被 GitHub 访问阻塞
 		if !flags.DisableAutoUpdate {
-			err := update.CheckAndUpdate()
-			if handleUpdateCheckResult(err, shutdown) {
-				return nil
-			}
 			go update.DoUpdateWorks(func() {
 				shutdown.shutdown(42)
 			})
@@ -136,20 +131,11 @@ var RootCmd = &cobra.Command{
 		go server.DoUploadBasicInfoWorks()
 		for {
 			server.UpdateBasicInfo()
-			server.EstablishWebSocketConnection()
+			server.EstablishWebSocketConnection(func() {
+				shutdown.shutdown(42)
+			})
 		}
 	},
-}
-
-func handleUpdateCheckResult(err error, shutdown *shutdownCoordinator) bool {
-	if errors.Is(err, update.ErrRestartRequired) {
-		shutdown.shutdown(42)
-		return true
-	}
-	if err != nil {
-		log.Println("[ERROR]", err)
-	}
-	return false
 }
 
 func Execute() {

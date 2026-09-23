@@ -21,6 +21,7 @@ const (
 	MethodAgentFileResult          = "agent.file.result"
 	MethodAgentStartupConfig       = "agent.startupConfig"
 	MethodAgentStartupConfigResult = "agent.startupConfig.result"
+	MethodAgentSwitchVersion       = "agent.switchVersion"
 )
 
 type Request struct {
@@ -65,6 +66,10 @@ type EventResult struct {
 
 type StartupConfigParams struct {
 	RequestID string `json:"request_id"`
+}
+
+type SwitchVersionParams struct {
+	Version string `json:"version"`
 }
 
 // Config is the unredacted, flat effective startup configuration.
