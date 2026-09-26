@@ -11,7 +11,7 @@ COPY --chmod=755 komari-agent-${TARGETOS}-${TARGETARCH} /app/komari-agent
 RUN touch /.komari-agent-container
 
 ENTRYPOINT ["/app/komari-agent"]
-# 运行时请指定参数
-# Please specify parameters at runtime.
+# 运行时请指定参数（命令行参数或环境变量均可）
+# Please specify parameters at runtime (CLI flags or environment variables).
 # eg: docker run komari-agent -e example.com -t token
-CMD ["--help"]
+CMD []
