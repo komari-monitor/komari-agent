@@ -39,7 +39,11 @@ type RegisterResponse struct {
 
 // getAutoDiscoveryFilePath 获取自动发现配置文件路径
 func getAutoDiscoveryFilePath() string {
-	// 获取程序运行目录
+	// 显式指定了状态文件路径（--auto-discovery-file / AGENT_AUTO_DISCOVERY_FILE）
+	if flags.AutoDiscoveryFile != "" {
+		return flags.AutoDiscoveryFile
+	}
+	// 默认与历史版本保持一致：保存在可执行文件所在目录
 	execPath, err := os.Executable()
 	if err != nil {
 		log.Println("Failed to get executable path:", err)
@@ -81,6 +85,11 @@ func saveAutoDiscoveryConfig(config *AutoDiscoveryConfig) error {
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal auto-discovery config: %v", err)
+	}
+
+	// 确保目录存在（自定义路径可能位于尚未创建的目录，例如容器内挂载的 /data）
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		return fmt.Errorf("failed to create directory for auto-discovery config: %v", err)
 	}
 
 	// 写入文件
