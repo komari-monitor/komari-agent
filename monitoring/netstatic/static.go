@@ -269,7 +269,7 @@ func startGoroutinesLocked() {
 				mu.Lock()
 				flushCacheLocked(uint64(t.Unix()))
 				purgeExpiredLocked()
-				_ = saveToFileLocked()
+				reportSave(saveToFileLocked())
 				mu.Unlock()
 			case <-stopCh:
 				return
@@ -308,6 +308,7 @@ func StartOrContinue() error {
 	if err := loadFromFileLocked(); err != nil {
 		return err
 	}
+	warnNotWritable()
 	// 启动 ticker
 	detectTicker = time.NewTicker(time.Duration(config.DetectInterval * float64(time.Second)))
 	saveTicker = time.NewTicker(time.Duration(config.SaveInterval * float64(time.Second)))
