@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/shirou/gopsutil/v4/disk"
@@ -30,8 +31,13 @@ func Disk() DiskInfo {
 					if err != nil {
 						continue
 					} else {
-						diskinfo.Total += u.Total
-						diskinfo.Used += u.Used
+						total, used := u.Total, u.Used
+						// btrfs 子卷设了 qgroup 配额时，用配额（statfs 返回的是整个存储池）
+						if limit, qused, ok := BtrfsQuotaFor(mountpoint); ok {
+							total, used = QuotaOrStatfs(total, used, limit, qused)
+						}
+						diskinfo.Total += total
+						diskinfo.Used += used
 					}
 				}
 			}
@@ -44,6 +50,13 @@ func Disk() DiskInfo {
 					u, err := disk.Usage(part.Mountpoint)
 					if err != nil {
 						continue
+					}
+					// btrfs 子卷设了 qgroup 配额时，用配额（statfs 返回的是整个存储池）
+					if strings.ToLower(part.Fstype) == "btrfs" {
+						if limit, qused, ok := BtrfsQuotaFor(part.Mountpoint); ok {
+							total, used := QuotaOrStatfs(u.Total, u.Used, limit, qused)
+							u = &disk.UsageStat{Path: u.Path, Fstype: u.Fstype, Total: total, Used: used}
+						}
 					}
 
 					deviceID := part.Device
@@ -71,6 +84,10 @@ func Disk() DiskInfo {
 				diskinfo.Used += u.Used
 			}
 		}
+	}
+	// 配额模式：--disk-total 指定总量，已用量改为扫描文件占用（用于 btrfs 配额、容器存储等 statfs 不准的环境）
+	if flags.DiskTotal != "" {
+		diskinfo = applyDiskTotal(diskinfo, flags.DiskTotal)
 	}
 	return diskinfo
 }
@@ -164,46 +181,82 @@ func isPhysicalDisk(part disk.PartitionStat) bool {
 	return true
 }
 
+// defaultDiskPartitions 返回默认模式下被监控的分区：同一物理设备只保留路径最短的根挂载点。
+// 结果按挂载点排序，保证输出稳定。
+func defaultDiskPartitions() ([]disk.PartitionStat, error) {
+	usage, err := disk.Partitions(true)
+	if err != nil {
+		return nil, err
+	}
+
+	deviceMap := make(map[string]disk.PartitionStat)
+	for _, part := range usage {
+		if isPhysicalDisk(part) {
+			deviceID := part.Device
+			// ZFS去重: 基于 pool 名称
+			if strings.ToLower(part.Fstype) == "zfs" {
+				if idx := strings.Index(deviceID, "/"); idx != -1 {
+					deviceID = deviceID[:idx]
+				}
+			}
+
+			if existing, ok := deviceMap[deviceID]; ok {
+				// 优先保留路径更短的挂载点 (e.g., /volume1 优于 /volume1/@appdata/...)
+				if len(part.Mountpoint) < len(existing.Mountpoint) {
+					deviceMap[deviceID] = part
+				}
+			} else {
+				deviceMap[deviceID] = part
+			}
+		}
+	}
+
+	parts := make([]disk.PartitionStat, 0, len(deviceMap))
+	for _, part := range deviceMap {
+		parts = append(parts, part)
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].Mountpoint < parts[j].Mountpoint })
+	return parts, nil
+}
+
+// includedMountpoints 解析 --include-mountpoint（分号分隔）。
+func includedMountpoints() []string {
+	var mounts []string
+	for _, mountpoint := range strings.Split(flags.IncludeMountpoints, ";") {
+		mountpoint = strings.TrimSpace(mountpoint)
+		if mountpoint != "" {
+			mounts = append(mounts, mountpoint)
+		}
+	}
+	return mounts
+}
+
+// DiskMountpoints 返回当前被监控的挂载点路径（不含文件系统类型）。
+func DiskMountpoints() ([]string, error) {
+	if flags.IncludeMountpoints != "" {
+		return includedMountpoints(), nil
+	}
+	parts, err := defaultDiskPartitions()
+	if err != nil {
+		return nil, err
+	}
+	mounts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		mounts = append(mounts, part.Mountpoint)
+	}
+	return mounts, nil
+}
+
 func DiskList() ([]string, error) {
 	diskList := []string{}
 	if flags.IncludeMountpoints != "" {
-		includeMounts := strings.Split(flags.IncludeMountpoints, ";")
-		for _, mountpoint := range includeMounts {
-			mountpoint = strings.TrimSpace(mountpoint)
-			if mountpoint != "" {
-				diskList = append(diskList, mountpoint)
-			}
-		}
+		diskList = append(diskList, includedMountpoints()...)
 	} else {
-		usage, err := disk.Partitions(true)
+		parts, err := defaultDiskPartitions()
 		if err != nil {
 			return nil, err
 		}
-
-		// 同一物理设备只保留路径最短的根挂载点
-		deviceMap := make(map[string]disk.PartitionStat)
-		for _, part := range usage {
-			if isPhysicalDisk(part) {
-				deviceID := part.Device
-				// ZFS去重: 基于 pool 名称
-				if strings.ToLower(part.Fstype) == "zfs" {
-					if idx := strings.Index(deviceID, "/"); idx != -1 {
-						deviceID = deviceID[:idx]
-					}
-				}
-
-				if existing, ok := deviceMap[deviceID]; ok {
-					// 优先保留路径更短的挂载点 (e.g., /volume1 优于 /volume1/@appdata/...)
-					if len(part.Mountpoint) < len(existing.Mountpoint) {
-						deviceMap[deviceID] = part
-					}
-				} else {
-					deviceMap[deviceID] = part
-				}
-			}
-		}
-
-		for _, part := range deviceMap {
+		for _, part := range parts {
 			diskList = append(diskList, fmt.Sprintf("%s (%s)", part.Mountpoint, part.Fstype))
 		}
 	}
