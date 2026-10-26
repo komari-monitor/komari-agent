@@ -15,6 +15,8 @@ type Config struct {
 	IncludeNics         string  `json:"include_nics" env:"AGENT_INCLUDE_NICS"`                     // 仅统计网卡，逗号分隔的网卡名称列表，支持通配符
 	ExcludeNics         string  `json:"exclude_nics" env:"AGENT_EXCLUDE_NICS"`                     // 统计时排除的网卡，逗号分隔的网卡名称列表，支持通配符
 	IncludeMountpoints  string  `json:"include_mountpoints" env:"AGENT_INCLUDE_MOUNTPOINTS"`       // 磁盘统计的包含挂载点列表，使用分号分隔
+	DiskTotal           string  `json:"disk_total" env:"AGENT_DISK_TOTAL"`                         // 固定上报的磁盘总量（如 1G、512M），并改为扫描文件占用计算已用量；用于 btrfs 配额、容器存储等 statfs 不准的环境
+	DisableBtrfsQuota   bool    `json:"disable_btrfs_quota" env:"AGENT_DISABLE_BTRFS_QUOTA"`       // 禁用 btrfs qgroup 配额自动检测，磁盘总量/已用量回到 statfs
 	MonthRotate         int     `json:"month_rotate" env:"AGENT_MONTH_ROTATE"`                     // 流量统计的月份重置日期（0表示禁用）
 	MemoryIncludeCache  bool    `json:"memory_include_cache" env:"AGENT_MEMORY_INCLUDE_CACHE"`     // 包括缓存/缓冲区的内存使用情况
 	MemoryReportRawUsed bool    `json:"memory_report_raw_used" env:"AGENT_MEMORY_REPORT_RAW_USED"` // 使用原始内存使用情况报告
