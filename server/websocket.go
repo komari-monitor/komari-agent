@@ -27,6 +27,8 @@ var (
 	v2AckMu       sync.Mutex
 	v2AckEventIDs []string
 	v2SeenEvents  = make(map[string]time.Time)
+	terminalDialMu sync.Mutex
+	terminalDials  = make(map[string]struct{})
 )
 
 const (
@@ -439,6 +441,21 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 
 // establishTerminalConnection 建立终端连接并使用terminal包处理终端操作
 func establishTerminalConnection(token, id, endpoint string) {
+	if id != "" {
+		terminalDialMu.Lock()
+		if _, active := terminalDials[id]; active {
+			terminalDialMu.Unlock()
+			return
+		}
+		terminalDials[id] = struct{}{}
+		terminalDialMu.Unlock()
+		defer func() {
+			terminalDialMu.Lock()
+			delete(terminalDials, id)
+			terminalDialMu.Unlock()
+		}()
+	}
+
 	endpoint = strings.TrimSuffix(endpoint, "/") + "/api/clients/terminal?token=" + token + "&id=" + id
 	endpoint = "ws" + strings.TrimPrefix(endpoint, "http")
 
@@ -449,19 +466,36 @@ func establishTerminalConnection(token, id, endpoint string) {
 		log.Printf("Warning: Failed to convert Terminal WebSocket IDN to ASCII: %v", err)
 	}
 
-	// 使用与主 WS 相同的拨号策略
-	dialer := newWSDialer()
+	// 会话保留期间持续重试，避免一次临时网络失败让终端请求永久丢失。
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		dialer := newWSDialer()
+		conn, _, err := dialer.Dial(endpoint, nil)
+		if err != nil {
+			log.Println("Failed to establish terminal connection, retrying in 15s:", err)
+			wait := 15 * time.Second
+			if remaining := time.Until(deadline); remaining < wait {
+				wait = remaining
+			}
+			if wait > 0 {
+				time.Sleep(wait)
+			}
+			continue
+		}
 
-	conn, _, err := dialer.Dial(endpoint, nil)
-	if err != nil {
-		log.Println("Failed to establish terminal connection:", err)
-		return
-	}
-
-	// 启动终端
-	terminal.StartTerminal(conn, id)
-	if conn != nil {
-		conn.Close()
+		retry := terminal.StartTerminal(conn, id)
+		_ = conn.Close()
+		if !retry {
+			break
+		}
+		// 会话已建连后因对端断线返回 retry，短暂间隔后即可重连，不必等满 15s。
+		wait := 2 * time.Second
+		if remaining := time.Until(deadline); remaining < wait {
+			wait = remaining
+		}
+		if wait > 0 {
+			time.Sleep(wait)
+		}
 	}
 }
 

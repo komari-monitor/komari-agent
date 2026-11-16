@@ -1,8 +1,6 @@
 package terminal
 
 import (
-	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
@@ -49,23 +47,23 @@ var (
 
 // StartTerminal keeps a PTY alive briefly after its WebSocket drops. A new
 // connection with the same request ID reattaches the existing shell.
-func StartTerminal(conn *websocket.Conn, requestID string) {
+func StartTerminal(conn *websocket.Conn, requestID string) bool {
 	if flags.DisableWebSsh {
-		_ = conn.WriteMessage(websocket.TextMessage, []byte("\n\nWeb SSH is disabled. Enable it by running without the --disable-web-ssh flag."))
+		notifyTerminate(conn)
 		_ = conn.Close()
-		return
+		return false
 	}
 	if requestID == "" {
-		_ = conn.WriteMessage(websocket.TextMessage, []byte("Terminal request ID is required.\r\n"))
+		notifyTerminate(conn)
 		_ = conn.Close()
-		return
+		return false
 	}
 
 	session, firstConnection, err := acquireSession(requestID, conn)
 	if err != nil {
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v\r\n", err)))
+		notifyTerminate(conn)
 		_ = conn.Close()
-		return
+		return false
 	}
 	if firstConnection {
 		go session.readOutput()
@@ -73,6 +71,10 @@ func StartTerminal(conn *websocket.Conn, requestID string) {
 
 	session.handleInput(conn)
 	_ = conn.Close()
+	session.mu.Lock()
+	retry := !session.removed
+	session.mu.Unlock()
+	return retry
 }
 
 func acquireSession(requestID string, conn *websocket.Conn) (*terminalSession, bool, error) {
@@ -92,8 +94,7 @@ func acquireSession(requestID string, conn *websocket.Conn) (*terminalSession, b
 		sessionsMu.Lock()
 		if sessions[requestID] != nil {
 			session = sessions[requestID]
-			orphan := impl.term
-			orphanTerm = orphan
+			orphanTerm = impl.term
 		} else {
 			sessions[requestID] = session
 			firstConnection = true
@@ -101,7 +102,6 @@ func acquireSession(requestID string, conn *websocket.Conn) (*terminalSession, b
 	}
 
 	session.mu.Lock()
-	session.removed = false
 	if session.timer != nil {
 		session.timer.Stop()
 		session.timer = nil
@@ -134,18 +134,13 @@ func (s *terminalSession) handleInput(conn *websocket.Conn) {
 			continue
 		}
 
-		var cmd struct {
-			Type  string `json:"type"`
-			Cols  int    `json:"cols,omitempty"`
-			Rows  int    `json:"rows,omitempty"`
-			Input string `json:"input,omitempty"`
-		}
-		if json.Unmarshal(data, &cmd) != nil {
+		cmd, ok := parseControl(data)
+		if !ok {
 			_, _ = s.term.Write(data)
 			continue
 		}
 		switch cmd.Type {
-		case "resize":
+		case controlTypeResize:
 			if cmd.Cols > 0 && cmd.Rows > 0 {
 				_ = s.term.Resize(cmd.Cols, cmd.Rows)
 			}
@@ -153,11 +148,17 @@ func (s *terminalSession) handleInput(conn *websocket.Conn) {
 			if cmd.Input != "" {
 				_, _ = s.term.Write([]byte(cmd.Input))
 			}
-		case "heartbeat":
-		case "close":
+		case controlTypeTerminate, "close":
+			// 服务端要求结束会话：这是终态，不重连。
 			closeSession(s.id, s)
 			return
+		case controlTypeAbort:
+			// 浏览器一侧掉线：PTY 保留，等服务端重连后重新附着。
+			s.detach(conn)
+			return
+		case "heartbeat":
 		}
+		// 未知控制消息按前向兼容忽略，绝不写进 PTY。
 	}
 }
 
@@ -166,6 +167,12 @@ func (s *terminalSession) readOutput() {
 	for {
 		n, err := s.term.Read(buf)
 		if err != nil {
+			// PTY 结束（用户 exit、进程被杀等）：这是正常终止，明确告诉
+			// 服务端不要等重连，而不是留下一根静默断掉的连接。
+			s.mu.Lock()
+			conn := s.conn
+			s.mu.Unlock()
+			notifyTerminate(conn)
 			closeSession(s.id, s)
 			return
 		}
@@ -178,10 +185,13 @@ func (s *terminalSession) readOutput() {
 		}
 		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
 			s.detach(conn)
+			continue
 		}
 	}
 }
 
+// detach 保留 PTY，等待服务端用同一个 request_id 重连回来。
+// 超过保留窗口仍未重连则清理。
 func (s *terminalSession) detach(conn *websocket.Conn) {
 	s.mu.Lock()
 	if s.removed || s.conn != conn {
@@ -195,6 +205,7 @@ func (s *terminalSession) detach(conn *websocket.Conn) {
 		})
 	}
 	s.mu.Unlock()
+	_ = conn.Close()
 }
 
 func closeSession(requestID string, expected *terminalSession) {
