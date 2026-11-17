@@ -35,6 +35,7 @@ type terminalSession struct {
 	term Terminal
 
 	mu      sync.Mutex
+	writeMu sync.Mutex
 	conn    *websocket.Conn
 	timer   *time.Timer
 	removed bool
@@ -156,7 +157,10 @@ func (s *terminalSession) handleInput(conn *websocket.Conn) {
 			// 浏览器一侧掉线：PTY 保留，等服务端重连后重新附着。
 			s.detach(conn)
 			return
-		case "heartbeat":
+		case controlTypeHeartbeat:
+			if cmd.ID != "" {
+				_ = s.writeJSON(conn, controlMessage{Type: controlTypeHeartbeat, ID: cmd.ID})
+			}
 		}
 		// 未知控制消息按前向兼容忽略，绝不写进 PTY。
 	}
@@ -172,7 +176,9 @@ func (s *terminalSession) readOutput() {
 			s.mu.Lock()
 			conn := s.conn
 			s.mu.Unlock()
-			notifyTerminate(conn)
+			if conn != nil {
+				_ = s.writeJSON(conn, controlMessage{Type: controlTypeTerminate})
+			}
 			closeSession(s.id, s)
 			return
 		}
@@ -183,11 +189,23 @@ func (s *terminalSession) readOutput() {
 		if conn == nil {
 			continue
 		}
-		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+		if err := s.writeMessage(conn, websocket.BinaryMessage, buf[:n]); err != nil {
 			s.detach(conn)
 			continue
 		}
 	}
+}
+
+func (s *terminalSession) writeMessage(conn *websocket.Conn, messageType int, data []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return conn.WriteMessage(messageType, data)
+}
+
+func (s *terminalSession) writeJSON(conn *websocket.Conn, v interface{}) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return conn.WriteJSON(v)
 }
 
 // detach 保留 PTY，等待服务端用同一个 request_id 重连回来。

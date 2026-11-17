@@ -467,7 +467,8 @@ func establishTerminalConnection(token, id, endpoint string) {
 	}
 
 	// 会话保留期间持续重试，避免一次临时网络失败让终端请求永久丢失。
-	deadline := time.Now().Add(5 * time.Minute)
+	const retryWindow = 5 * time.Minute
+	deadline := time.Now().Add(retryWindow)
 	for time.Now().Before(deadline) {
 		dialer := newWSDialer()
 		conn, _, err := dialer.Dial(endpoint, nil)
@@ -488,6 +489,8 @@ func establishTerminalConnection(token, id, endpoint string) {
 		if !retry {
 			break
 		}
+		// 每次已建立的连接意外断开后，重新按完整保留窗口等待恢复。
+		deadline = time.Now().Add(retryWindow)
 		// 会话已建连后因对端断线返回 retry，短暂间隔后即可重连，不必等满 15s。
 		wait := 2 * time.Second
 		if remaining := time.Until(deadline); remaining < wait {
