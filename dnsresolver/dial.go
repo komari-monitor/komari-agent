@@ -92,8 +92,9 @@ func dialIPs(ctx context.Context, dial dialFunc, network, port string, ips []str
 	}
 
 	if len(fallback) == 0 {
+		// 只有一个地址族时无从比较，不更新 lastGoodFamily。
 		conn, ip, err := dialSerial(ctx, dial, network, port, primary)
-		return finishDial(conn, ip, err)
+		return finishDial(conn, ip, err, false)
 	}
 
 	type result struct {
@@ -139,7 +140,7 @@ func dialIPs(ctx context.Context, dial dialFunc, network, port string, ips []str
 						}
 					}
 				}(pending)
-				return finishDial(res.conn, res.ip, nil)
+				return finishDial(res.conn, res.ip, nil, true)
 			}
 			errs = append(errs, res.err)
 			if res.primary && !fallbackStarted {
@@ -149,17 +150,17 @@ func dialIPs(ctx context.Context, dial dialFunc, network, port string, ips []str
 				start(fallback, false)
 			}
 			if pending == 0 {
-				return finishDial(nil, "", errors.Join(errs...))
+				return finishDial(nil, "", errors.Join(errs...), false)
 			}
 		}
 	}
 }
 
-func finishDial(conn net.Conn, ip string, err error) (net.Conn, error) {
+func finishDial(conn net.Conn, ip string, err error, remember bool) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial to any of the resolved IPs: %w", err)
 	}
-	if family := ipFamily(ip); family != "" {
+	if family := ipFamily(ip); remember && family != "" {
 		lastGoodFamily.Store(family)
 	}
 	return conn, nil

@@ -123,6 +123,20 @@ func TestDialIPsReportsAllErrors(t *testing.T) {
 	}
 }
 
+func TestDialIPsSingleFamilyDoesNotUpdateMemory(t *testing.T) {
+	resetFamilyMemory(t)
+	lastGoodFamily.Store("6")
+	f := &fakeDialer{}
+	conn, err := dialIPs(context.Background(), f.dial, "tcp", "443", []string{"192.0.2.1"}, time.Second)
+	if err != nil {
+		t.Fatalf("dialIPs() error = %v", err)
+	}
+	conn.Close()
+	if got := lastGoodFamily.Load(); got != "6" {
+		t.Fatalf("lastGoodFamily = %v, want unchanged 6", got)
+	}
+}
+
 func TestDialIPsRespectsNetworkFamily(t *testing.T) {
 	resetFamilyMemory(t)
 	f := &fakeDialer{}
