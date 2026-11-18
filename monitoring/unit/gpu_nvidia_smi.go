@@ -6,6 +6,8 @@ package monitoring
 import (
 	"encoding/xml"
 	"errors"
+	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -161,22 +163,23 @@ func parseMemoryValue(value string) (uint64, error) {
 	return result * 1024 * 1024, nil
 }
 
-// 解析温度值 (例如 "65 C" -> 65)
+// 解析 nvidia-smi 输出的整数或小数温度，四舍五入到整摄氏度。
 func parseTemperatureValue(value string) (uint64, error) {
-	cleaned := strings.TrimSpace(value)
-	cleaned = strings.TrimSuffix(cleaned, "C")
-	cleaned = strings.TrimSpace(cleaned)
-
+	cleaned := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "C"))
 	if cleaned == "" {
 		return 0, nil
 	}
 
-	result, err := strconv.ParseUint(cleaned, 10, 64)
+	result, err := strconv.ParseFloat(cleaned, 64)
 	if err != nil {
 		return 0, err
 	}
 
-	return result, nil
+	rounded := math.Round(result)
+	if math.IsNaN(result) || result < 0 || rounded >= 0x1p64 {
+		return 0, fmt.Errorf("invalid NVIDIA GPU temperature %q", value)
+	}
+	return uint64(rounded), nil
 }
 
 // NVIDIA-SMI XML结构定义
