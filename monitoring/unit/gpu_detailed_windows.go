@@ -12,7 +12,7 @@ type DetailedGPUInfo struct {
 	MemoryTotal uint64  `json:"memory_total"` // 总显存 (字节)
 	MemoryUsed  uint64  `json:"memory_used"`  // 已用显存 (字节)
 	Utilization float64 `json:"utilization"`  // GPU使用率 (0-100)
-	Temperature uint64  `json:"temperature"`  // 温度 (摄氏度)
+	Temperature float64 `json:"temperature"`  // 温度 (摄氏度)
 }
 
 // GetDetailedGPUHost 获取GPU型号信息 (Windows: 仅支持 NVIDIA)

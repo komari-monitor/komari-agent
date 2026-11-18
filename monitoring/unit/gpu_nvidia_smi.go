@@ -25,7 +25,7 @@ type NVIDIAGPUInfo struct {
 	MemoryTotal uint64  // 总显存 (字节)
 	MemoryUsed  uint64  // 已用显存 (字节)
 	Utilization float64 // GPU使用率 (0-100)
-	Temperature uint64  // 温度 (摄氏度)
+	Temperature float64 // 温度 (摄氏度)
 }
 
 func (smi *NvidiaSMI) GatherModel() ([]string, error) {
@@ -163,8 +163,8 @@ func parseMemoryValue(value string) (uint64, error) {
 	return result * 1024 * 1024, nil
 }
 
-// 解析 nvidia-smi 输出的整数或小数温度，四舍五入到整摄氏度。
-func parseTemperatureValue(value string) (uint64, error) {
+// 解析 nvidia-smi 输出的整数或小数温度。
+func parseTemperatureValue(value string) (float64, error) {
 	cleaned := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "C"))
 	if cleaned == "" {
 		return 0, nil
@@ -175,11 +175,10 @@ func parseTemperatureValue(value string) (uint64, error) {
 		return 0, err
 	}
 
-	rounded := math.Round(result)
-	if math.IsNaN(result) || result < 0 || rounded >= 0x1p64 {
+	if math.IsNaN(result) || result < 0 || math.IsInf(result, 0) {
 		return 0, fmt.Errorf("invalid NVIDIA GPU temperature %q", value)
 	}
-	return uint64(rounded), nil
+	return result, nil
 }
 
 // NVIDIA-SMI XML结构定义

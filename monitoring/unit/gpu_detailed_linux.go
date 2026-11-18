@@ -19,7 +19,7 @@ type DetailedGPUInfo struct {
 	MemoryTotal uint64  `json:"memory_total"` // 总显存 (字节)
 	MemoryUsed  uint64  `json:"memory_used"`  // 已用显存 (字节)
 	Utilization float64 `json:"utilization"`  // GPU使用率 (0-100)
-	Temperature uint64  `json:"temperature"`  // 温度 (摄氏度)
+	Temperature float64 `json:"temperature"`  // 温度 (摄氏度)
 }
 
 func getDetailedVendor() uint8 {
@@ -214,7 +214,7 @@ func getAMDROCmDetailedInfo() ([]DetailedGPUInfo, error) {
 			MemoryTotal: amdInfo.MemoryTotal,
 			MemoryUsed:  amdInfo.MemoryUsed,
 			Utilization: amdInfo.Utilization,
-			Temperature: amdInfo.Temperature,
+			Temperature: float64(amdInfo.Temperature),
 		})
 	}
 	return gpuInfos, nil

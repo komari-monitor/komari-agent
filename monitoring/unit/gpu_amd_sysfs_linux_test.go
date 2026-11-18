@@ -13,7 +13,7 @@ func TestAMDSysfsDetailedInfo(t *testing.T) {
 		t.Skip("no amdgpu sysfs metrics on this host")
 	}
 	for i, info := range infos {
-		t.Logf("gpu[%d] name=%s util=%.1f mem=%d/%d temp=%d", i, info.Name, info.Utilization, info.MemoryUsed, info.MemoryTotal, info.Temperature)
+		t.Logf("gpu[%d] name=%s util=%.1f mem=%d/%d temp=%g", i, info.Name, info.Utilization, info.MemoryUsed, info.MemoryTotal, info.Temperature)
 		if info.Name == "" {
 			t.Errorf("gpu[%d] missing name", i)
 		}

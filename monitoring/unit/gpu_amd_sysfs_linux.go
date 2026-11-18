@@ -31,7 +31,7 @@ func getAMDSysfsDetailedInfo() ([]DetailedGPUInfo, error) {
 			MemoryTotal: card.memoryTotal,
 			MemoryUsed:  card.memoryUsed,
 			Utilization: card.utilization,
-			Temperature: card.temperature,
+			Temperature: float64(card.temperature),
 		})
 	}
 	return infos, nil

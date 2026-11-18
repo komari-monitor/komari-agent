@@ -27,7 +27,7 @@ func TestDetailedGPUDetection(t *testing.T) {
 			t.Logf("GPU detailed info collection failed: %v", err)
 		} else {
 			for i, info := range detailedInfo {
-				t.Logf("GPU %d: %s - Memory: %dMB/%dMB, Usage: %.1f%%, Temp: %d°C",
+				t.Logf("GPU %d: %s - Memory: %dMB/%dMB, Usage: %.1f%%, Temp: %g°C",
 					i, info.Name, info.MemoryUsed, info.MemoryTotal, info.Utilization, info.Temperature)
 			}
 		}
@@ -53,7 +53,7 @@ func TestDetailedGPUInfo(t *testing.T) {
 		t.Logf("  Memory Used: %d MB", info.MemoryUsed)
 		//t.Logf("  Memory Free: %d MB", info.MemoryFree)
 		t.Logf("  Utilization: %.1f%%", info.Utilization)
-		t.Logf("  Temperature: %d°C", info.Temperature)
+		t.Logf("  Temperature: %g°C", info.Temperature)
 
 		// 验证数据的合理性
 		//if info.MemoryTotal > 0 && info.MemoryUsed+info.MemoryFree != info.MemoryTotal {
