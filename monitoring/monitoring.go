@@ -67,7 +67,7 @@ type gpuDeviceReport struct {
 	MemoryTotal uint64  `json:"memory_total"`
 	MemoryUsed  uint64  `json:"memory_used"`
 	Utilization float64 `json:"utilization"`
-	Temperature uint64  `json:"temperature"`
+	Temperature float64 `json:"temperature"`
 }
 
 func GenerateReport() []byte {
