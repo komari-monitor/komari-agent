@@ -469,10 +469,22 @@ func establishTerminalConnection(token, id, endpoint string) {
 	// 会话保留期间持续重试，避免一次临时网络失败让终端请求永久丢失。
 	const retryWindow = 5 * time.Minute
 	deadline := time.Now().Add(retryWindow)
+	established := false
 	for time.Now().Before(deadline) {
 		dialer := newWSDialer()
-		conn, _, err := dialer.Dial(endpoint, nil)
+		conn, resp, err := dialer.Dial(endpoint, nil)
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		if err != nil {
+			if resp != nil && isTerminalPermanentReject(resp.StatusCode) {
+				log.Printf("Terminal session %s rejected by server (%s), closing local session", id, resp.Status)
+				terminal.CloseSession(id)
+				return
+			}
+			if established && !terminal.HasSession(id) {
+				return
+			}
 			log.Println("Failed to establish terminal connection, retrying in 15s:", err)
 			wait := 15 * time.Second
 			if remaining := time.Until(deadline); remaining < wait {
@@ -484,13 +496,29 @@ func establishTerminalConnection(token, id, endpoint string) {
 			continue
 		}
 
-		retry := terminal.StartTerminal(conn, id)
+		var retry bool
+		if established {
+			retry = terminal.ReattachTerminal(conn, id)
+		} else {
+			established = true
+			retry = terminal.StartTerminal(conn, id)
+		}
 		_ = conn.Close()
 		if !retry {
 			break
 		}
-		// 每次已建立的连接意外断开后，重新按完整保留窗口等待恢复。
-		deadline = time.Now().Add(retryWindow)
+		// 严格对齐本地会话的保留截止时间：若会话处于浏览器挂起倒计时中，不因
+		// 反复断连而无限延长重试窗口；正常活跃连接断线则获得完整 5 分钟窗口。
+		if sessionDeadline, ok := terminal.SessionDeadline(id); ok {
+			deadline = sessionDeadline
+		} else if !terminal.HasSession(id) {
+			shortDeadline := time.Now().Add(5 * time.Second)
+			if shortDeadline.Before(deadline) {
+				deadline = shortDeadline
+			}
+		} else {
+			deadline = time.Now().Add(retryWindow)
+		}
 		// 会话已建连后因对端断线返回 retry，短暂间隔后即可重连，不必等满 15s。
 		wait := 2 * time.Second
 		if remaining := time.Until(deadline); remaining < wait {
@@ -499,6 +527,15 @@ func establishTerminalConnection(token, id, endpoint string) {
 		if wait > 0 {
 			time.Sleep(wait)
 		}
+	}
+}
+
+func isTerminalPermanentReject(statusCode int) bool {
+	switch statusCode {
+	case http.StatusNotFound, http.StatusUnauthorized, http.StatusForbidden, http.StatusGone:
+		return true
+	default:
+		return false
 	}
 }
 

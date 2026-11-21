@@ -21,6 +21,7 @@ import (
 const (
 	controlTypeHeartbeat = "heartbeat"
 	controlTypeResize    = "resize"
+	controlTypeReady     = "ready"
 	controlTypeTerminate = "terminate"
 	controlTypeAbort     = "abort"
 )

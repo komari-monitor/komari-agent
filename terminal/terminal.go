@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -11,8 +12,22 @@ import (
 
 var flags = pkg_flags.GlobalConfig
 
-// 与 Server 端会话保留窗口对齐，网络恢复后同一会话可重新附着。
-const disconnectedRetention = 5 * time.Minute
+var (
+	configMu sync.RWMutex
+	// 与 Server 端会话保留窗口对齐，网络恢复后同一会话可重新附着。
+	disconnectedRetention = 5 * time.Minute
+	terminalPingInterval  = 30 * time.Second
+	terminalReadWait      = 75 * time.Second
+	terminalWriteWait     = 10 * time.Second
+
+	errSessionGone = errors.New("terminal session no longer exists")
+)
+
+func getTerminalTiming() (retention, pingInterval, readWait, writeWait time.Duration) {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return disconnectedRetention, terminalPingInterval, terminalReadWait, terminalWriteWait
+}
 
 // Terminal 接口定义平台特定的终端操作
 type Terminal interface {
@@ -34,11 +49,14 @@ type terminalSession struct {
 	id   string
 	term Terminal
 
-	mu      sync.Mutex
-	writeMu sync.Mutex
-	conn    *websocket.Conn
-	timer   *time.Timer
-	removed bool
+	mu              sync.Mutex
+	writeMu         sync.Mutex
+	conn            *websocket.Conn
+	timer           *time.Timer
+	timerGen        uint64
+	timerDeadline   time.Time
+	browserDetached bool
+	removed         bool
 }
 
 var (
@@ -49,6 +67,16 @@ var (
 // StartTerminal keeps a PTY alive briefly after its WebSocket drops. A new
 // connection with the same request ID reattaches the existing shell.
 func StartTerminal(conn *websocket.Conn, requestID string) bool {
+	return startTerminal(conn, requestID, true)
+}
+
+// ReattachTerminal reattaches an existing PTY session without spawning a new
+// shell if the local session already exited or expired.
+func ReattachTerminal(conn *websocket.Conn, requestID string) bool {
+	return startTerminal(conn, requestID, false)
+}
+
+func startTerminal(conn *websocket.Conn, requestID string, allowCreate bool) bool {
 	if flags.DisableWebSsh {
 		notifyTerminate(conn)
 		_ = conn.Close()
@@ -60,7 +88,7 @@ func StartTerminal(conn *websocket.Conn, requestID string) bool {
 		return false
 	}
 
-	session, firstConnection, err := acquireSession(requestID, conn)
+	session, firstConnection, err := acquireSession(requestID, conn, allowCreate)
 	if err != nil {
 		notifyTerminate(conn)
 		_ = conn.Close()
@@ -78,12 +106,67 @@ func StartTerminal(conn *websocket.Conn, requestID string) bool {
 	return retry
 }
 
-func acquireSession(requestID string, conn *websocket.Conn) (*terminalSession, bool, error) {
+// HasSession reports whether a local PTY session with requestID is still alive.
+func HasSession(requestID string) bool {
+	if requestID == "" {
+		return false
+	}
+	sessionsMu.Lock()
+	session := sessions[requestID]
+	sessionsMu.Unlock()
+	if session == nil {
+		return false
+	}
+	session.mu.Lock()
+	alive := !session.removed
+	session.mu.Unlock()
+	return alive
+}
+
+// SessionDeadline returns the current retention deadline of a suspended local
+// session, if a retention timer is active.
+func SessionDeadline(requestID string) (time.Time, bool) {
+	if requestID == "" {
+		return time.Time{}, false
+	}
+	sessionsMu.Lock()
+	session := sessions[requestID]
+	sessionsMu.Unlock()
+	if session == nil {
+		return time.Time{}, false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.removed || session.timerDeadline.IsZero() {
+		return time.Time{}, false
+	}
+	return session.timerDeadline, true
+}
+
+// CloseSession terminates a local PTY session by requestID (e.g. when the
+// server rejects reconnect with 404).
+func CloseSession(requestID string) {
+	if requestID == "" {
+		return
+	}
+	sessionsMu.Lock()
+	session := sessions[requestID]
+	sessionsMu.Unlock()
+	if session != nil {
+		closeSession(requestID, session, false)
+	}
+}
+
+func acquireSession(requestID string, conn *websocket.Conn, allowCreate bool) (*terminalSession, bool, error) {
 	sessionsMu.Lock()
 	var orphanTerm Terminal
 	session := sessions[requestID]
 	firstConnection := false
 	if session == nil {
+		if !allowCreate {
+			sessionsMu.Unlock()
+			return nil, false, errSessionGone
+		}
 		sessionsMu.Unlock()
 
 		impl, err := newTerminalImpl()
@@ -103,9 +186,18 @@ func acquireSession(requestID string, conn *websocket.Conn) (*terminalSession, b
 	}
 
 	session.mu.Lock()
-	if session.timer != nil {
-		session.timer.Stop()
-		session.timer = nil
+	if session.removed {
+		session.mu.Unlock()
+		sessionsMu.Unlock()
+		if orphanTerm != nil {
+			go gracefulClose(orphanTerm)
+		}
+		return nil, false, errSessionGone
+	}
+	// 如果已知浏览器处于断开挂起态，重连服务端后不取消本地保留倒计时，
+	// 直到收到浏览器恢复信号（ready / resize / heartbeat / 输入）再取消。
+	if !session.browserDetached {
+		session.stopTimerLocked()
 	}
 	oldConn := session.conn
 	session.conn = conn
@@ -122,42 +214,94 @@ func acquireSession(requestID string, conn *websocket.Conn) (*terminalSession, b
 	return session, firstConnection, nil
 }
 
+func startConnKeepalive(conn *websocket.Conn) (stop func(), refreshReadDeadline func()) {
+	if conn == nil {
+		return func() {}, func() {}
+	}
+	_, pingInterval, readWait, writeWait := getTerminalTiming()
+	refresh := func() {
+		_ = conn.SetReadDeadline(time.Now().Add(readWait))
+	}
+	refresh()
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readWait))
+	})
+	conn.SetPingHandler(func(data string) error {
+		if err := conn.SetReadDeadline(time.Now().Add(readWait)); err != nil {
+			return err
+		}
+		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(writeWait))
+	})
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+	}, refresh
+}
+
 func (s *terminalSession) handleInput(conn *websocket.Conn) {
+	stopKeepalive, refreshReadDeadline := startConnKeepalive(conn)
+	defer stopKeepalive()
+
 	for {
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
 			s.detach(conn)
 			return
 		}
+		refreshReadDeadline()
 
 		if messageType == websocket.BinaryMessage {
+			s.markBrowserActive()
 			_, _ = s.term.Write(data)
 			continue
 		}
 
 		cmd, ok := parseControl(data)
 		if !ok {
+			s.markBrowserActive()
 			_, _ = s.term.Write(data)
 			continue
 		}
 		switch cmd.Type {
+		case controlTypeReady:
+			s.markBrowserActive()
 		case controlTypeResize:
+			s.markBrowserActive()
 			if cmd.Cols > 0 && cmd.Rows > 0 {
 				_ = s.term.Resize(cmd.Cols, cmd.Rows)
 			}
 		case "input":
+			s.markBrowserActive()
 			if cmd.Input != "" {
 				_, _ = s.term.Write([]byte(cmd.Input))
 			}
 		case controlTypeTerminate, "close":
 			// 服务端要求结束会话：这是终态，不重连。
-			closeSession(s.id, s)
+			closeSession(s.id, s, false)
 			return
 		case controlTypeAbort:
-			// 浏览器一侧掉线：PTY 保留，等服务端重连后重新附着。
-			s.detach(conn)
-			return
+			// 浏览器一侧掉线：保持当前 WS 连接在线等待恢复或服务端 terminate，
+			// 同时在本地按固定保留窗口兜底计时（兼容旧版服务端），避免先断再重连引发续期循环。
+			s.markBrowserDetached()
 		case controlTypeHeartbeat:
+			s.markBrowserActive()
 			if cmd.ID != "" {
 				_ = s.writeJSON(conn, controlMessage{Type: controlTypeHeartbeat, ID: cmd.ID})
 			}
@@ -173,13 +317,7 @@ func (s *terminalSession) readOutput() {
 		if err != nil {
 			// PTY 结束（用户 exit、进程被杀等）：这是正常终止，明确告诉
 			// 服务端不要等重连，而不是留下一根静默断掉的连接。
-			s.mu.Lock()
-			conn := s.conn
-			s.mu.Unlock()
-			if conn != nil {
-				_ = s.writeJSON(conn, controlMessage{Type: controlTypeTerminate})
-			}
-			closeSession(s.id, s)
+			closeSession(s.id, s, true)
 			return
 		}
 
@@ -208,25 +346,71 @@ func (s *terminalSession) writeJSON(conn *websocket.Conn, v interface{}) error {
 	return conn.WriteJSON(v)
 }
 
+func (s *terminalSession) startTimerLocked(retention time.Duration) {
+	if s.timer != nil || s.removed {
+		return
+	}
+	s.timerGen++
+	gen := s.timerGen
+	s.timerDeadline = time.Now().Add(retention)
+	s.timer = time.AfterFunc(retention, func() {
+		s.mu.Lock()
+		if s.removed || s.timerGen != gen {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		closeSession(s.id, s, true)
+	})
+}
+
+func (s *terminalSession) stopTimerLocked() {
+	s.timerGen++
+	s.timerDeadline = time.Time{}
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+}
+
+func (s *terminalSession) markBrowserDetached() {
+	retention, _, _, _ := getTerminalTiming()
+	s.mu.Lock()
+	if !s.removed {
+		s.browserDetached = true
+		s.startTimerLocked(retention)
+	}
+	s.mu.Unlock()
+}
+
+func (s *terminalSession) markBrowserActive() {
+	s.mu.Lock()
+	if !s.removed {
+		s.browserDetached = false
+		s.stopTimerLocked()
+	}
+	s.mu.Unlock()
+}
+
 // detach 保留 PTY，等待服务端用同一个 request_id 重连回来。
-// 超过保留窗口仍未重连则清理。
+// 超过保留窗口仍未重连则清理；若已在挂起倒计时中则不重置截止时间。
 func (s *terminalSession) detach(conn *websocket.Conn) {
+	retention, _, _, _ := getTerminalTiming()
 	s.mu.Lock()
 	if s.removed || s.conn != conn {
 		s.mu.Unlock()
 		return
 	}
 	s.conn = nil
-	if s.timer == nil {
-		s.timer = time.AfterFunc(disconnectedRetention, func() {
-			closeSession(s.id, s)
-		})
-	}
+	s.startTimerLocked(retention)
 	s.mu.Unlock()
 	_ = conn.Close()
 }
 
-func closeSession(requestID string, expected *terminalSession) {
+func closeSession(requestID string, expected *terminalSession, notifyPeer bool) {
+	if expected == nil {
+		return
+	}
 	sessionsMu.Lock()
 	session := sessions[requestID]
 	if session == nil || session != expected {
@@ -242,16 +426,16 @@ func closeSession(requestID string, expected *terminalSession) {
 		return
 	}
 	session.removed = true
-	if session.timer != nil {
-		session.timer.Stop()
-		session.timer = nil
-	}
+	session.stopTimerLocked()
 	conn := session.conn
 	session.conn = nil
 	term := session.term
 	session.mu.Unlock()
 
 	if conn != nil {
+		if notifyPeer {
+			_ = session.writeJSON(conn, controlMessage{Type: controlTypeTerminate})
+		}
 		_ = conn.Close()
 	}
 	_ = gracefulClose(term)

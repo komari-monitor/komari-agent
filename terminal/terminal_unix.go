@@ -114,6 +114,11 @@ type unixTerminal struct {
 
 // Close 关闭终端，并尝试优雅地终止 shell 进程及其子进程。
 func (t *unixTerminal) Close() error {
+	defer func() {
+		if t.tty != nil {
+			_ = t.tty.Close()
+		}
+	}()
 	if t.cmd == nil || t.cmd.Process == nil {
 		return fmt.Errorf("terminal process is already nil or not started")
 	}
