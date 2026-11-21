@@ -146,19 +146,8 @@ func buildTransportWithPreferenceAndHTTP2(timeout time.Duration, tlsConfig *tls.
 			if err != nil {
 				return nil, err
 			}
-			sortIPsByPreference(ips, preferIPVersion)
-			for _, ip := range ips {
-				dialer := &net.Dialer{
-					Timeout:   timeout,
-					KeepAlive: 30 * time.Second,
-					DualStack: true,
-				}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+			orderIPs(ips, preferIPVersion)
+			return dialIPs(ctx, newBaseDialer().DialContext, network, port, ips, connectTimeout(timeout))
 		},
 		MaxIdleConns:          32,
 		MaxIdleConnsPerHost:   4,
@@ -230,7 +219,7 @@ func GetNetDialer(timeout time.Duration) *net.Dialer {
 // GetDialContext 返回一个自定义 DialContext：
 // - 使用自定义解析器解析主机名
 // - 根据本机网络自动选择 IPv4 或 IPv6 优先
-// - 逐个 IP 进行连接尝试，直到成功或全部失败
+// - 以 Happy Eyeballs 方式并行尝试 IPv4/IPv6，先连上者胜出
 func GetDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return GetDialContextWithPreference(timeout, "")
 }
@@ -260,21 +249,8 @@ func GetDialContextWithPreference(timeout time.Duration, preferIPVersion string)
 			return nil, err
 		}
 
-		sortIPsByPreference(ips, preferIPVersion)
-
-		// 逐个 IP 尝试连接
-		for _, ip := range ips {
-			d := &net.Dialer{
-				Timeout:   timeout,
-				KeepAlive: 30 * time.Second,
-				DualStack: true,
-			}
-			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
-			if err == nil {
-				return c, nil
-			}
-		}
-		return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+		orderIPs(ips, preferIPVersion)
+		return dialIPs(ctx, newBaseDialer().DialContext, network, port, ips, timeout)
 	}
 }
 
