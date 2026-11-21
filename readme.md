@@ -54,6 +54,7 @@ export AGENT_TOKEN="your-token"
 | `include_nics` | `AGENT_INCLUDE_NICS` | `--include-nics` | 仅统计指定网卡，逗号分隔 | `0.0.22` |
 | `exclude_nics` | `AGENT_EXCLUDE_NICS` | `--exclude-nics` | 排除指定网卡，逗号分隔 | `0.0.22` |
 | `include_mountpoints` | `AGENT_INCLUDE_MOUNTPOINTS` | `--include-mountpoint` | 仅统计指定挂载点，分号分隔 | `0.1.0` |
+| `disk_total` | `AGENT_DISK_TOTAL` | `--disk-total` | 固定上报的磁盘总量（如 `1G`、`512M`，K/M/G/T 为 1024 进制），并通过扫描文件占用计算已用量。用于 btrfs 配额、部分 LXC/容器存储等 `statfs` 返回整个存储池的环境；未设置时行为不变 | 待定 |
 | `month_rotate` | `AGENT_MONTH_ROTATE` | `--month-rotate` | 流量统计每月重置日期，`0` 为禁用 | `0.1.0` |
 | `auto_discovery_key` | `AGENT_AUTO_DISCOVERY_KEY` | `--auto-discovery` | 自动发现密钥 | `1.0.40` |
 | `custom_dns` | `AGENT_CUSTOM_DNS` | `--custom-dns` | 自定义 DNS 服务器 | `1.0.80` |

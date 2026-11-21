@@ -176,6 +176,8 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.IncludeNics, "include-nics", "", "Comma-separated list of network interfaces to include")
 	RootCmd.PersistentFlags().StringVar(&flags.ExcludeNics, "exclude-nics", "", "Comma-separated list of network interfaces to exclude")
 	RootCmd.PersistentFlags().StringVar(&flags.IncludeMountpoints, "include-mountpoint", "", "Semicolon-separated list of mount points to include for disk statistics")
+	RootCmd.PersistentFlags().StringVar(&flags.DiskTotal, "disk-total", "", "Report this fixed disk total (e.g. 1G, 512M; K/M/G/T are 1024-based) and compute used space by scanning files instead of statfs. For btrfs quotas / container storage where statfs reports the whole pool")
+	RootCmd.PersistentFlags().BoolVar(&flags.DisableBtrfsQuota, "disable-btrfs-quota", false, "Disable automatic detection of btrfs qgroup quotas (use plain statfs for disk total/used)")
 	RootCmd.PersistentFlags().IntVar(&flags.MonthRotate, "month-rotate", 0, "Month reset for network statistics (0 to disable)")
 	RootCmd.PersistentFlags().BoolVar(&flags.MemoryIncludeCache, "memory-include-cache", false, "Include cache/buffer in memory usage")
 	RootCmd.PersistentFlags().BoolVar(&flags.MemoryReportRawUsed, "memory-exclude-bcf", false, "Use \"raminfo.Used = v.Total - v.Free - v.Buffers - v.Cached\" calculation for memory usage")
