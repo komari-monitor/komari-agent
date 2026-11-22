@@ -1,5 +1,7 @@
 # komari-agent
 
+简体中文 | [English](readme.en.md)
+
 ## 配置方式
 
 agent 参数可以通过命令行参数、环境变量或 JSON 配置文件传入。
