@@ -24,6 +24,7 @@ type GPUInfo struct {
 	LUIDHighPart          int32  // 局部唯一标识符高位
 	LUIDLowPart           uint32 // 局部唯一标识符低位
 	Flags                 uint32 // 适配器标志特征位
+	IndirectDisplay       bool   // 是否为间接显示（IDD）适配器，如远程软件的虚拟显示器
 }
 
 func (g *GPUInfo) DedicatedVideoMemoryMB() uint64 {
@@ -53,6 +54,30 @@ var iidIDXGIFactory1 = guid{
 	Data2: 0xF26F,
 	Data3: 0x4DBA,
 	Data4: [8]byte{0xA8, 0x29, 0x25, 0x3C, 0x83, 0xD1, 0xB3, 0x87},
+}
+
+const (
+	kmtqaiTypeAdapterType               = 15     // KMTQAITYPE_ADAPTERTYPE
+	kmtAdapterTypeIndirectDisplayDevice = 1 << 6 // D3DKMT_ADAPTERTYPE.IndirectDisplayDevice
+)
+
+// 对应 D3DKMT_OPENADAPTERFROMLUID
+type d3dkmtOpenAdapterFromLuid struct {
+	AdapterLuid luid
+	hAdapter    uint32
+}
+
+// 对应 D3DKMT_QUERYADAPTERINFO
+type d3dkmtQueryAdapterInfo struct {
+	hAdapter              uint32
+	Type                  uint32
+	pPrivateDriverData    unsafe.Pointer
+	PrivateDriverDataSize uint32
+}
+
+// 对应 D3DKMT_CLOSEADAPTER
+type d3dkmtCloseAdapter struct {
+	hAdapter uint32
 }
 
 type guid struct {
@@ -182,6 +207,51 @@ func (a *idxgiAdapter1) Release() uint32 {
 	return uint32(ret)
 }
 
+// isIndirectDisplayAdapter 通过 D3DKMT 查询适配器类型，判断是否为间接显示（IDD）适配器。
+// 远程软件（如网易 UU 远程、向日葵）安装的虚拟显示器会被 DXGI 枚举成独立 LUID 的适配器，
+// 且名称、厂商 ID 与渲染它的物理显卡相同，只能通过该标志区分。查询失败时返回 false，保持原有行为。
+func isIndirectDisplayAdapter(adapterLuid luid) bool {
+	gdi32, err := syscall.LoadDLL("gdi32.dll")
+	if err != nil {
+		return false
+	}
+	defer gdi32.Release()
+
+	procOpen, err := gdi32.FindProc("D3DKMTOpenAdapterFromLuid")
+	if err != nil {
+		return false
+	}
+	procQuery, err := gdi32.FindProc("D3DKMTQueryAdapterInfo")
+	if err != nil {
+		return false
+	}
+	procClose, err := gdi32.FindProc("D3DKMTCloseAdapter")
+	if err != nil {
+		return false
+	}
+
+	open := d3dkmtOpenAdapterFromLuid{AdapterLuid: adapterLuid}
+	if ret, _, _ := syscall.SyscallN(procOpen.Addr(), uintptr(unsafe.Pointer(&open))); ret != 0 {
+		return false
+	}
+	defer func() {
+		closeArgs := d3dkmtCloseAdapter{hAdapter: open.hAdapter}
+		syscall.SyscallN(procClose.Addr(), uintptr(unsafe.Pointer(&closeArgs)))
+	}()
+
+	var adapterType uint32
+	query := d3dkmtQueryAdapterInfo{
+		hAdapter:              open.hAdapter,
+		Type:                  kmtqaiTypeAdapterType,
+		pPrivateDriverData:    unsafe.Pointer(&adapterType),
+		PrivateDriverDataSize: uint32(unsafe.Sizeof(adapterType)),
+	}
+	if ret, _, _ := syscall.SyscallN(procQuery.Addr(), uintptr(unsafe.Pointer(&query))); ret != 0 {
+		return false
+	}
+	return adapterType&kmtAdapterTypeIndirectDisplayDevice != 0
+}
+
 // GetGPUs 枚举并获取系统中所有 DXGI 图形适配器信息。
 func GetGPUs() ([]GPUInfo, error) {
 	dxgiDLL, err := syscall.LoadDLL("dxgi.dll")
@@ -268,6 +338,7 @@ func GetGPUs() ([]GPUInfo, error) {
 			LUIDHighPart:          desc.AdapterLuid.HighPart,
 			LUIDLowPart:           desc.AdapterLuid.LowPart,
 			Flags:                 desc.Flags,
+			IndirectDisplay:       isIndirectDisplayAdapter(desc.AdapterLuid),
 		}
 
 		gpus = append(gpus, info)
@@ -281,6 +352,10 @@ func GpuName() string {
 	if err != nil {
 		return "Unknown"
 	}
+	return gpuNameFromAdapters(gpus)
+}
+
+func gpuNameFromAdapters(gpus []GPUInfo) string {
 
 	type GPUKey struct {
 		LUIDHighPart int32
@@ -291,6 +366,9 @@ func GpuName() string {
 
 	for _, gpu := range gpus {
 		if (gpu.Flags & (1 << 1)) != 0 { // DXGI_ADAPTER_FLAG_SOFTWARE
+			continue
+		}
+		if gpu.IndirectDisplay { // 虚拟显示器，不是独立的 GPU
 			continue
 		}
 
