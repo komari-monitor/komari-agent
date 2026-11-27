@@ -72,7 +72,9 @@ type SwitchVersionParams struct {
 	Version string `json:"version"`
 }
 
-// Config is the unredacted, flat effective startup configuration.
+// Config is the flat effective startup configuration. Sensitive credentials
+// (token / auto_discovery_key) are redacted to "[REDACTED]" before capture;
+// see cmd/flags/startup.go.
 type StartupConfigResult struct {
 	RequestID string                 `json:"request_id"`
 	Config    map[string]interface{} `json:"config,omitempty"`
