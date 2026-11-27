@@ -383,3 +383,167 @@ func TestCloseSessionTerminatesLocalPTY(t *testing.T) {
 		t.Fatal("PTY was not closed by CloseSession")
 	}
 }
+
+// TestExpiryCallbackNeverKillsResumedSession deterministically drives the
+// interleaving where the retention timer fires while the browser resumes the
+// session: the stale-generation timer callback must never remove a session
+// that has been reactivated (markBrowserActive / acquireSession reattach).
+func TestExpiryCallbackNeverKillsResumedSession(t *testing.T) {
+	resetAgentSessions(t)
+	setAgentTestTiming(t, 40*time.Millisecond, 5*time.Second, 5*time.Second, time.Second)
+
+	// Single-round deterministic scenario pinned on the timerGen comparison:
+	// abort arms gen 1 -> resume (stops timer, bumps gen) -> abort re-arms
+	// gen 2 -> a stale gen-1 callback must be rejected while the newer
+	// retention timer survives; the matching gen-2 callback must close.
+	// This distinguishes a correct generation comparison from a degraded
+	// implementation that merely checks timer == nil.
+	const id = "agent-expiry-race"
+	pty := newFakePTY()
+	session := &terminalSession{id: id, term: pty}
+	sessionsMu.Lock()
+	sessions[id] = session
+	sessionsMu.Unlock()
+
+	// First abort arms the retention timer at generation 1.
+	session.mu.Lock()
+	session.browserDetached = true
+	session.startTimerLocked(time.Hour) // never fires; callbacks driven manually
+	staleGen := session.timerGen
+	session.mu.Unlock()
+	if staleGen == 0 {
+		t.Fatal("arming the retention timer must bump timerGen above zero")
+	}
+
+	// Browser resumes: the timer is stopped and the generation bumps.
+	session.markBrowserActive()
+
+	// Browser drops again: a fresh timer is armed at a newer generation.
+	session.mu.Lock()
+	session.browserDetached = true
+	session.startTimerLocked(time.Hour)
+	currentGen := session.timerGen
+	currentTimer := session.timer
+	session.mu.Unlock()
+	if currentGen <= staleGen {
+		t.Fatalf("re-arming after resume must advance timerGen (stale=%d, current=%d)", staleGen, currentGen)
+	}
+
+	// The stale gen-1 callback fires late. It must observe the generation
+	// mismatch inside the critical section and leave the session untouched —
+	// crucially the re-armed timer must survive, which a timer==nil-only
+	// check cannot guarantee (it would see a non-nil timer and kill).
+	closeSessionWithGen(id, session, true, &staleGen)
+	if !HasSession(id) {
+		t.Fatal("stale-generation callback killed the re-armed session")
+	}
+	if pty.isClosed() {
+		t.Fatal("stale-generation callback closed the PTY of the re-armed session")
+	}
+	session.mu.Lock()
+	if session.removed {
+		session.mu.Unlock()
+		t.Fatal("stale-generation callback marked the session removed")
+	}
+	if session.timer == nil || session.timer != currentTimer {
+		session.mu.Unlock()
+		t.Fatal("stale-generation callback disturbed the live retention timer")
+	}
+	session.mu.Unlock()
+
+	// The matching gen-2 callback is the legitimate owner of this generation:
+	// it must close the session and release the PTY.
+	closeSessionWithGen(id, session, true, &currentGen)
+	if HasSession(id) {
+		t.Fatal("matching-generation close was wrongly rejected")
+	}
+	if !pty.isClosed() {
+		t.Fatal("matching-generation close did not release the PTY")
+	}
+}
+
+// TestCloseSessionReleasesResourcesWhenWriteBlocked verifies that even when a
+// data-frame write is blocked behind writeMu backpressure, closeSession still
+// closes the WebSocket connection and releases the PTY instead of hanging.
+func TestCloseSessionReleasesResourcesWhenWriteBlocked(t *testing.T) {
+	resetAgentSessions(t)
+	// A short write wait bounds how long the blocked writer can hold writeMu.
+	setAgentTestTiming(t, 5*time.Second, 5*time.Second, 5*time.Second, 100*time.Millisecond)
+
+	const id = "agent-close-write-blocked"
+	pty := newFakePTY()
+	session := &terminalSession{id: id, term: pty}
+	sessionsMu.Lock()
+	sessions[id] = session
+	sessionsMu.Unlock()
+
+	client, server := newAgentWSPair(t)
+	// The server side never reads, creating TCP backpressure; the 100ms write
+	// deadline in writeJSON/writeMessage guarantees the write side errors out
+	// instead of hanging forever.
+	_ = server
+	session.mu.Lock()
+	session.conn = client
+	session.mu.Unlock()
+
+	// Occupy writeMu with large writes that the peer never drains. The writer
+	// blocks in the kernel or fails fast via the write deadline — either way
+	// closeSession must not wait indefinitely. Only symbols that already
+	// exist in the pre-fix baseline (writeMu, writeMessage, closeSession,
+	// terminalWriteWait) are used, so this test double-snapshots FAIL on the
+	// baseline (blocked writeMu never releases, closeSession hangs) and PASS
+	// on the fixed tree.
+	big := make([]byte, 4*1024*1024)
+	writeStarted := make(chan struct{})
+	writeDone := make(chan struct{})
+	go func() {
+		close(writeStarted)
+		for i := 0; i < 64; i++ {
+			if err := session.writeMessage(client, websocket.BinaryMessage, big); err != nil {
+				break
+			}
+		}
+		close(writeDone)
+	}()
+	<-writeStarted
+
+	// Wait until the writer is actually inside writeMessage holding writeMu
+	// before closing — otherwise the close could complete before the writer
+	// even starts, making the test vacuous.
+	muWait := time.Now().Add(2 * time.Second)
+	for {
+		locked := session.writeMu.TryLock()
+		if locked {
+			session.writeMu.Unlock()
+			if time.Now().After(muWait) {
+				t.Fatal("writer never acquired writeMu; test setup broken")
+			}
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		break
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		closeSession(id, session, true)
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("closeSession hung behind blocked writeMu; PTY/connection resources leaked")
+	}
+	if HasSession(id) {
+		t.Fatal("session still present after closeSession under write pressure")
+	}
+	if !pty.isClosed() {
+		t.Fatal("PTY was not closed by closeSession under write pressure")
+	}
+	select {
+	case <-writeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked writer never observed connection close")
+	}
+}

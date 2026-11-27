@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -39,6 +40,8 @@ func notifyTerminate(conn *websocket.Conn) {
 	if conn == nil {
 		return
 	}
+	_, _, _, writeWait := getTerminalTiming()
+	_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 	_ = conn.WriteJSON(controlMessage{Type: controlTypeTerminate})
 }
 

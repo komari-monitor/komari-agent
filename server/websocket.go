@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -24,9 +25,9 @@ import (
 )
 
 var (
-	v2AckMu       sync.Mutex
-	v2AckEventIDs []string
-	v2SeenEvents  = make(map[string]time.Time)
+	v2AckMu        sync.Mutex
+	v2AckEventIDs  []string
+	v2SeenEvents   = make(map[string]time.Time)
 	terminalDialMu sync.Mutex
 	terminalDials  = make(map[string]struct{})
 )
@@ -400,6 +401,11 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			RequestID string `json:"request_id"`
 		}
 		if err := v2.BindParams(params, &p); err == nil {
+			// 空 request_id 会绕过 terminalDials 去重且无法定位会话，拒绝以防 DoS。
+			if strings.TrimSpace(p.RequestID) == "" {
+				log.Print("bad v2 terminal params: empty request_id")
+				return false
+			}
 			go establishTerminalConnection(flags.Token, p.RequestID, flags.Endpoint)
 			return true
 		} else {
@@ -441,22 +447,24 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 
 // establishTerminalConnection 建立终端连接并使用terminal包处理终端操作
 func establishTerminalConnection(token, id, endpoint string) {
-	if id != "" {
-		terminalDialMu.Lock()
-		if _, active := terminalDials[id]; active {
-			terminalDialMu.Unlock()
-			return
-		}
-		terminalDials[id] = struct{}{}
-		terminalDialMu.Unlock()
-		defer func() {
-			terminalDialMu.Lock()
-			delete(terminalDials, id)
-			terminalDialMu.Unlock()
-		}()
+	// 空 request_id 无法定位会话且会绕过拨号去重，直接拒绝。
+	if strings.TrimSpace(id) == "" {
+		return
 	}
+	terminalDialMu.Lock()
+	if _, active := terminalDials[id]; active {
+		terminalDialMu.Unlock()
+		return
+	}
+	terminalDials[id] = struct{}{}
+	terminalDialMu.Unlock()
+	defer func() {
+		terminalDialMu.Lock()
+		delete(terminalDials, id)
+		terminalDialMu.Unlock()
+	}()
 
-	endpoint = strings.TrimSuffix(endpoint, "/") + "/api/clients/terminal?token=" + token + "&id=" + id
+	endpoint = strings.TrimSuffix(endpoint, "/") + "/api/clients/terminal?token=" + token + "&id=" + url.QueryEscape(id)
 	endpoint = "ws" + strings.TrimPrefix(endpoint, "http")
 
 	// 转换中文域名为 ASCII 兼容编码
@@ -482,6 +490,10 @@ func establishTerminalConnection(token, id, endpoint string) {
 				terminal.CloseSession(id)
 				return
 			}
+			if flags.DisableWebSsh {
+				// 远程控制已禁用：首个拨号失败即退出，绝不进入 5 分钟重试风暴。
+				return
+			}
 			if established && !terminal.HasSession(id) {
 				return
 			}
@@ -494,6 +506,14 @@ func establishTerminalConnection(token, id, endpoint string) {
 				time.Sleep(wait)
 			}
 			continue
+		}
+
+		if flags.DisableWebSsh {
+			// 远程控制已禁用：至多单次拨号交付 terminate 后立刻退出，
+			// 绝不进入循环重试；非 101 状态由上层 err 分支处理。
+			terminal.StartTerminal(conn, id)
+			_ = conn.Close()
+			return
 		}
 
 		var retry bool
